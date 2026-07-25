@@ -9,10 +9,10 @@ from webull.data.common.category import Category
 from webull.data.common.timespan import Timespan
 
 # Import strategies
-import breakout
+import M5breakout
 
 # Active strategy selection & configuration
-ACTIVE_STRATEGY = breakout.analyze
+ACTIVE_STRATEGY = M5breakout.analyze
 STRATEGY_PARAMS = {
     "lookback": 20,       # Bars for Resistance (Entry)
     "exit_lookback": 10   # Bars for Support (Exit)

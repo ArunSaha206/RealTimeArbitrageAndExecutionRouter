@@ -1,6 +1,8 @@
 import os
 import math
 import numpy as np
+import pandas as pd
+import yfinance as yf
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from webull.core.client import ApiClient
@@ -9,18 +11,18 @@ from webull.data.common.category import Category
 from webull.data.common.timespan import Timespan
 
 # Import strategy module and ticker selection universe
-import breakout as strategy
+import M5breakout as strategy
 from tickers import ACTIVE_UNIVERSE
 
 # =====================================================================
 # 1. BACKTEST CONFIGURATION
 # =====================================================================
 BAR_RESOLUTION = "M5"        # Options: "M1", "M5", "M15", "M30", "H1", "D1"
-STARTING_CASH_PER_TICKER = 10000.00     # Virtual starting cash allocated per asset
+STARTING_CASH_PER_TICKER = 3000.00     # Virtual starting cash allocated per asset
 DAYS_TO_TEST = 50            # Calendar days back to evaluate
 RISK_FREE_RATE = 0.04        # 4% annualized risk-free rate assumption for Sharpe Ratio
 
-# Position sizing mode: "ALL_IN" (max affordable shares) or "FIXED_SHARES"
+# Position sizing mode: "ALL_IN" / "ALLIN" (max affordable shares) or "FIXED_SHARES"
 POSITION_MODE = "ALL_IN"     
 FIXED_SHARE_QTY = 10         # Used if POSITION_MODE == "FIXED_SHARES"
 
@@ -112,6 +114,77 @@ def calculate_sharpe_ratio(equity_curve, periods_per_year=19500):
     sharpe = np.mean(excess_returns) / np.std(excess_returns) * np.sqrt(periods_per_year)
     return float(sharpe)
 
+def get_beta_and_alpha(strategy_daily_returns, benchmark_symbol="SPY", risk_free_rate_annual=0.04):
+    """
+    Computes Beta (β) and Period Jensen's Alpha (α) against a target benchmark.
+    Period Alpha reflects actual outperformance over the backtest duration without annualization distortion.
+    """
+    if strategy_daily_returns.empty or len(strategy_daily_returns) < 3:
+        return None
+
+    # Standardize strategy return index to naive dates
+    strat_returns = strategy_daily_returns.copy()
+    strat_returns.index = pd.to_datetime(strat_returns.index).tz_localize(None).normalize()
+
+    min_date = strat_returns.index.min()
+    max_date = strat_returns.index.max()
+    
+    start_date = (min_date - timedelta(days=3)).strftime('%Y-%m-%d')
+    end_date = (max_date + timedelta(days=3)).strftime('%Y-%m-%d')
+
+    try:
+        bench_data = yf.download(benchmark_symbol, start=start_date, end=end_date, progress=False)
+    except Exception:
+        return None
+
+    if bench_data.empty:
+        return None
+
+    # Handle yfinance multi-index columns
+    if isinstance(bench_data.columns, pd.MultiIndex):
+        if 'Close' in bench_data.columns.get_level_values(0):
+            bench_close = bench_data['Close']
+            bench_close = bench_close[benchmark_symbol] if benchmark_symbol in bench_close.columns else bench_close.iloc[:, 0]
+        else:
+            bench_close = bench_data.iloc[:, 0]
+    else:
+        bench_close = bench_data['Close'] if 'Close' in bench_data.columns else bench_data.iloc[:, 0]
+
+    bench_close.index = pd.to_datetime(bench_close.index).tz_localize(None).normalize()
+    bench_returns = bench_close.pct_change().dropna()
+
+    # Align dates
+    aligned = pd.concat([strat_returns, bench_returns], axis=1, join='inner').dropna()
+    aligned.columns = ['strategy', 'benchmark']
+
+    if len(aligned) < 3:
+        return None
+
+    # 1. Beta Calculation (Covariance / Variance)
+    cov_matrix = np.cov(aligned['strategy'], aligned['benchmark'])
+    covariance = cov_matrix[0, 1]
+    benchmark_variance = cov_matrix[1, 1]
+    beta = covariance / benchmark_variance if benchmark_variance != 0 else 1.0
+
+    # 2. Cumulative Period Returns (Not Annualized)
+    strat_period_return = (1 + aligned['strategy']).prod() - 1
+    bench_period_return = (1 + aligned['benchmark']).prod() - 1
+
+    # 3. Period Risk-Free Rate Adjustment
+    num_days = (max_date - min_date).days
+    risk_free_period = (1 + risk_free_rate_annual) ** (num_days / 365.0) - 1
+
+    # 4. Period Jensen's Alpha (CAPM Model)
+    expected_return = risk_free_period + beta * (bench_period_return - risk_free_period)
+    alpha = strat_period_return - expected_return
+
+    return {
+        "beta": float(beta),
+        "alpha_pct": float(alpha * 100),
+        "strat_return_pct": float(strat_period_return * 100),
+        "bench_return_pct": float(bench_period_return * 100)
+    }
+
 # =====================================================================
 # 3. SINGLE-TICKER BACKTEST ENGINE
 # =====================================================================
@@ -150,6 +223,7 @@ def backtest_single_symbol(symbol, data_client, timespan):
 
     trades = []
     equity_curve = []
+    timestamps = []
 
     rolling_buffer = formatted_bars[:lookback_window]
     simulation_bars = formatted_bars[lookback_window:]
@@ -161,6 +235,7 @@ def backtest_single_symbol(symbol, data_client, timespan):
 
         portfolio_value = cash + (position_qty * current_price)
         equity_curve.append(portfolio_value)
+        timestamps.append(current_dt)
 
         signal_result = strategy.analyze(
             rolling_buffer, 
@@ -171,12 +246,17 @@ def backtest_single_symbol(symbol, data_client, timespan):
 
         # --- EXECUTE BUY SIGNAL ---
         if signal == "BUY" and position_qty == 0:
-            if POSITION_MODE == "ALL_IN":
-                position_qty = int(cash // current_price)
-            else:
-                position_qty = FIXED_SHARE_QTY
+            # Normalize positioning mode check so "ALL_IN", "ALLIN", or "all_in" work reliably
+            mode = str(POSITION_MODE).upper().replace("_", "").strip()
 
-            if position_qty > 0:
+            if mode == "ALLIN":
+                shares_to_buy = int(cash // current_price) if current_price > 0 else 0
+            else:
+                shares_to_buy = FIXED_SHARE_QTY
+
+            # Execute trade only if we can afford at least 1 share
+            if shares_to_buy > 0 and (shares_to_buy * current_price) <= cash:
+                position_qty = shares_to_buy
                 cost = position_qty * current_price
                 cash -= cost
                 entry_price = current_price
@@ -227,7 +307,7 @@ def backtest_single_symbol(symbol, data_client, timespan):
             "bars_held": len(formatted_bars) - entry_bar_index
         })
 
-    # Metric calculations
+    # Basic Metric calculations
     final_balance = cash
     total_net_pnl = final_balance - STARTING_CASH_PER_TICKER
     total_net_pnl_pct = (total_net_pnl / STARTING_CASH_PER_TICKER) * 100
@@ -235,10 +315,22 @@ def backtest_single_symbol(symbol, data_client, timespan):
     start_stock_price = formatted_bars[lookback_window]['close']
     end_stock_price = formatted_bars[-1]['close']
     stock_pnl_pct = ((end_stock_price - start_stock_price) / start_stock_price) * 100
-    alpha_pct = total_net_pnl_pct - stock_pnl_pct
 
     max_dd_dollars, max_dd_pct = calculate_max_drawdown(equity_curve)
     sharpe = calculate_sharpe_ratio(equity_curve)
+
+    # Convert intra-bar equity to daily returns series for Beta calculation
+    single_equity_df = pd.DataFrame({"datetime": timestamps, "equity": equity_curve})
+    single_equity_df['date'] = pd.to_datetime(single_equity_df['datetime']).dt.date
+    daily_single_equity = single_equity_df.groupby('date')['equity'].last()
+    single_daily_returns = daily_single_equity.pct_change().dropna()
+
+    # Calculate Beta & Alpha vs the asset's OWN Buy-and-Hold benchmark
+    single_beta_metrics = get_beta_and_alpha(
+        single_daily_returns, 
+        benchmark_symbol=symbol, 
+        risk_free_rate_annual=RISK_FREE_RATE
+    )
 
     return {
         "symbol": symbol,
@@ -246,23 +338,25 @@ def backtest_single_symbol(symbol, data_client, timespan):
         "net_pnl": total_net_pnl,
         "net_pnl_pct": total_net_pnl_pct,
         "buy_hold_pct": stock_pnl_pct,
-        "alpha_pct": alpha_pct,
+        "alpha_pct": single_beta_metrics["alpha_pct"] if single_beta_metrics else (total_net_pnl_pct - stock_pnl_pct),
+        "beta": single_beta_metrics["beta"] if single_beta_metrics else 1.0,
         "max_dd_dollars": max_dd_dollars,
         "max_dd_pct": max_dd_pct,
         "sharpe_ratio": sharpe,
         "trades": trades,
         "equity_curve": equity_curve,
+        "timestamps": timestamps,
         "bars_count": len(formatted_bars)
     }
 
 # =====================================================================
-# 4. MULTI-TICKER RUNNER & AGGREGATOR
+# 4. MONTE CARLO SIMULATION
 # =====================================================================
 
-def run_monte_carlo_simulation(all_trades, starting_capital, num_simulations=1000):
+def run_monte_carlo_simulation(all_trades, starting_capital, num_simulations=1000, ruin_threshold_pct=20.0):
     """
-    Runs a Monte Carlo simulation by randomly resampling trade outcomes
-    to stress-test drawdown limits and probability distributions.
+    Runs an advanced Monte Carlo simulation measuring risk of ruin, 
+    losing streak distributions, and probability milestones.
     """
     if not all_trades:
         print("⚠️ No trades available for Monte Carlo simulation.")
@@ -273,49 +367,88 @@ def run_monte_carlo_simulation(all_trades, starting_capital, num_simulations=100
 
     final_balances = []
     max_drawdowns_pct = []
+    max_consecutive_losses_list = []
+    ruin_count = 0
 
     for _ in range(num_simulations):
-        # Randomly shuffle trade order with replacement (Bootstrapping)
-        simulated_pnl_sequence = np.random.choice(trade_pnl_dollars, size=num_trades, replace=True)
+        # Randomly resample trade sequence
+        simulated_pnl = np.random.choice(trade_pnl_dollars, size=num_trades, replace=True)
         
-        # Track portfolio curve for this simulation run
-        equity_curve = [starting_capital]
         current_balance = starting_capital
         peak = starting_capital
         max_dd_pct = 0.0
+        
+        current_streak = 0
+        max_streak = 0
+        hit_ruin = False
 
-        for pnl in simulated_pnl_sequence:
+        for pnl in simulated_pnl:
             current_balance += pnl
-            equity_curve.append(current_balance)
 
+            # Track Drawdown
             if current_balance > peak:
                 peak = current_balance
-            
             dd = (peak - current_balance) / peak * 100 if peak > 0 else 0.0
             if dd > max_dd_pct:
                 max_dd_pct = dd
+            
+            # Track Risk of Ruin threshold
+            if dd >= ruin_threshold_pct:
+                hit_ruin = True
+
+            # Track Consecutive Losses
+            if pnl < 0:
+                current_streak += 1
+                if current_streak > max_streak:
+                    max_streak = current_streak
+            else:
+                current_streak = 0
+
+        if hit_ruin:
+            ruin_count += 1
 
         final_balances.append(current_balance)
         max_drawdowns_pct.append(max_dd_pct)
+        max_consecutive_losses_list.append(max_streak)
 
-    # Statistical percentiles across all 1,000 simulations
-    median_final_cash = np.percentile(final_balances, 50)
-    p5_final_cash = np.percentile(final_balances, 5)   # 5th percentile (pessimistic)
-    p95_final_cash = np.percentile(final_balances, 95) # 95th percentile (optimistic)
+    # Calculate Probability Statistics
+    pnl_array = np.array(final_balances) - starting_capital
+    prob_profitable = (np.sum(pnl_array > 0) / num_simulations) * 100
+    risk_of_ruin = (ruin_count / num_simulations) * 100
 
-    median_dd = np.percentile(max_drawdowns_pct, 50)
-    p95_dd = np.percentile(max_drawdowns_pct, 95)       # 95% worst-case drawdown
+    p5_final = np.percentile(final_balances, 5)
+    p25_final = np.percentile(final_balances, 25)
+    p50_final = np.percentile(final_balances, 50)
+    p75_final = np.percentile(final_balances, 75)
+    p95_final = np.percentile(final_balances, 95)
 
-    print("\n" + "=" * 88)
-    print(f"            MONTE CARLO SIMULATION RESULTS ({num_simulations:,} Iterations)            ")
-    print("=" * 88)
-    print(f" Starting Portfolio Capital:     ${starting_capital:,.2f}")
-    print(f" Median Expected Ending Cash:    ${median_final_cash:,.2f} (P&L: ${median_final_cash - starting_capital:+,.2f})")
-    print(f" 90% Confidence Return Window:   ${p5_final_cash:,.2f}  to  ${p95_final_cash:,.2f}")
-    print("-" * 88)
-    print(f" Median Max Drawdown:            -{median_dd:.2f}%")
-    print(f" 95th Percentile Max Drawdown:   -{p95_dd:.2f}%  (Worst 5% of alternate realities)")
-    print("=" * 88 + "\n")
+    p50_dd = np.percentile(max_drawdowns_pct, 50)
+    p95_dd = np.percentile(max_drawdowns_pct, 95)
+    
+    p50_streak = int(np.percentile(max_consecutive_losses_list, 50))
+    p95_streak = int(np.percentile(max_consecutive_losses_list, 95))
+
+    print("\n" + "=" * 92)
+    print(f"         ADVANCED MONTE CARLO STRESS TEST ({num_simulations:,} Iterations)           ")
+    print("=" * 92)
+    print(f" 🎯 Overall Win Probability:     {prob_profitable:.1f}% of outcomes ended in net profit")
+    print(f" ⚠️ Risk of Ruin (≥{ruin_threshold_pct:.0f}% Drawdown): {risk_of_ruin:.1f}% chance of hitting account distress")
+    print("-" * 92)
+    print(" 📊 EXPECTED RETURN DISTRIBUTION:")
+    print(f"    • 95th Percentile (Optimistic): ${p95_final:,.2f}  (+{(p95_final-starting_capital)/starting_capital*100:+.2f}%)")
+    print(f"    • 75th Percentile:              ${p75_final:,.2f}  (+{(p75_final-starting_capital)/starting_capital*100:+.2f}%)")
+    print(f"    • 50th Percentile (Median):     ${p50_final:,.2f}  (+{(p50_final-starting_capital)/starting_capital*100:+.2f}%)")
+    print(f"    • 25th Percentile:              ${p25_final:,.2f}  (+{(p25_final-starting_capital)/starting_capital*100:+.2f}%)")
+    print(f"    • 5th Percentile  (Pessimistic): ${p5_final:,.2f}  (+{(p5_final-starting_capital)/starting_capital*100:+.2f}%)")
+    print("-" * 92)
+    print(" 📉 RISK & STREAK METRICS:")
+    print(f"    • Median Drawdown vs. 95% Worst Case:   -{p50_dd:.2f}%  |  95th %ile: -{p95_dd:.2f}%")
+    print(f"    • Median Loss Streak vs. 95% Worst Case: {p50_streak} losses in a row  |  95th %ile: {p95_streak} in a row")
+    print("=" * 92 + "\n")
+
+# =====================================================================
+# 5. MULTI-TICKER RUNNER & AGGREGATOR
+# =====================================================================
 
 def run_backtest():
     print(f"🚀 Initializing Multi-Ticker Backtest Engine...")
@@ -337,14 +470,14 @@ def run_backtest():
         if res:
             all_results.append(res)
             all_trades.extend(res["trades"])
-            print(f"Done. Net P&L: ${res['net_pnl']:+,.2f} ({res['net_pnl_pct']:+.2f}%) | Alpha: {res['alpha_pct']:+.2f}% | Trades: {len(res['trades'])}")
+            print(f"Done. Net P&L: ${res['net_pnl']:+,.2f} ({res['net_pnl_pct']:+.2f}%) | Beta: {res['beta']:.2f} | Alpha: {res['alpha_pct']:+.2f}% | Trades: {len(res['trades'])}")
 
     if not all_results:
         print("❌ No valid ticker data evaluated. Exiting backtest.")
         return
 
     # =====================================================================
-    # 5. DASHBOARD & AGGREGATE SUMMARY
+    # 6. DASHBOARD & AGGREGATE SUMMARY
     # =====================================================================
     total_initial_capital = len(all_results) * STARTING_CASH_PER_TICKER
     total_ending_capital = sum(r["final_balance"] for r in all_results)
@@ -352,13 +485,27 @@ def run_backtest():
     aggregate_pnl_pct = (aggregate_pnl / total_initial_capital) * 100
 
     avg_buy_hold_pct = sum(r["buy_hold_pct"] for r in all_results) / len(all_results)
-    overall_alpha_pct = aggregate_pnl_pct - avg_buy_hold_pct
 
-    # Portfolio combined equity curve
+    # Align combined portfolio timeline and compute portfolio daily returns
     min_length = min(len(r["equity_curve"]) for r in all_results)
     combined_equity = np.zeros(min_length)
     for r in all_results:
         combined_equity += np.array(r["equity_curve"][:min_length])
+
+    combined_timestamps = all_results[0]["timestamps"][:min_length]
+
+    # Convert portfolio equity curve to daily returns for broad market SPY Beta comparison
+    portfolio_df = pd.DataFrame({"datetime": combined_timestamps, "equity": combined_equity})
+    portfolio_df['date'] = pd.to_datetime(portfolio_df['datetime']).dt.date
+    daily_portfolio_equity = portfolio_df.groupby('date')['equity'].last()
+    portfolio_daily_returns = daily_portfolio_equity.pct_change().dropna()
+
+    # Broad Market SPY Beta & Alpha calculation
+    spy_metrics = get_beta_and_alpha(
+        portfolio_daily_returns, 
+        benchmark_symbol="SPY", 
+        risk_free_rate_annual=RISK_FREE_RATE
+    )
 
     portfolio_max_dd_dollars, portfolio_max_dd_pct = calculate_max_drawdown(combined_equity)
     portfolio_sharpe = calculate_sharpe_ratio(combined_equity)
@@ -375,31 +522,37 @@ def run_backtest():
     gross_loss = abs(sum(t["pnl_dollars"] for t in losing_trades))
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0.0)
 
-    print("\n" + "=" * 88)
+    print("\n" + "=" * 92)
     print(f"                       PER-TICKER BREAKDOWN SUMMARY                         ")
-    print("=" * 88)
-    print(f"{'Ticker':<8} | {'Trades':<7} | {'Net P&L ($)':<12} | {'Strategy %':<10} | {'B&H %':<9} | {'Alpha %':<9} | {'Max DD %':<8} | {'Sharpe':<6}")
-    print("-" * 88)
+    print("=" * 92)
+    print(f"{'Ticker':<8} | {'Trades':<6} | {'Net P&L ($)':<11} | {'Strategy %':<10} | {'B&H %':<8} | {'Beta (β)':<8} | {'Alpha %':<8} | {'Max DD %':<8}")
+    print("-" * 92)
     for r in all_results:
-        print(f"{r['symbol']:<8} | {len(r['trades']):<7} | ${r['net_pnl']:>+10,.2f} | {r['net_pnl_pct']:>+9.2f}% | {r['buy_hold_pct']:>+8.2f}% | {r['alpha_pct']:>+8.2f}% | -{r['max_dd_pct']:>6.2f}% | {r['sharpe_ratio']:>6.2f}")
-    print("=" * 88)
+        print(f"{r['symbol']:<8} | {len(r['trades']):<6} | ${r['net_pnl']:>+9,.2f} | {r['net_pnl_pct']:>+9.2f}% | {r['buy_hold_pct']:>+7.2f}% | {r['beta']:>8.2f} | {r['alpha_pct']:>+7.2f}% | -{r['max_dd_pct']:>6.2f}%")
+    print("=" * 92)
 
-    print("\n" + "=" * 88)
+    print("\n" + "=" * 92)
     print(f"                     COMBINED PORTFOLIO PERFORMANCE                         ")
-    print("=" * 88)
-    print(f" Total Symbols Evaluated:  {len(all_results)} / {len(ACTIVE_UNIVERSE)}")
-    print(f" Combined Starting Cash:   ${total_initial_capital:,.2f}")
-    print(f" Combined Ending Cash:     ${total_ending_capital:,.2f}")
-    print(f" Aggregate Net P&L:        ${aggregate_pnl:+,.2f} ({aggregate_pnl_pct:+.2f}%)")
-    print(f" Benchmark Average Return: {avg_buy_hold_pct:+.2f}%")
-    print(f" Overall Alpha Generated:  {overall_alpha_pct:+.2f}% vs. Buy & Hold")
-    print("-" * 88)
-    print(f" Total Trades Executed:    {total_trade_count}")
-    print(f" Win Rate:                 {win_rate:.1f}% ({wins_count} W / {losses_count} L)")
-    print(f" Profit Factor:            {profit_factor:.2f} (Gross Profit: ${gross_profit:,.2f} / Gross Loss: ${gross_loss:,.2f})")
-    print(f" Max Portfolio Drawdown:   -${portfolio_max_dd_dollars:,.2f} (-{portfolio_max_dd_pct:.2f}%)")
-    print(f" Portfolio Sharpe Ratio:   {portfolio_sharpe:.2f}")
-    print("=" * 88 + "\n")
+    print("=" * 92)
+    print(f" Total Symbols Evaluated:     {len(all_results)} / {len(ACTIVE_UNIVERSE)}")
+    print(f" Combined Starting Cash:      ${total_initial_capital:,.2f}")
+    print(f" Combined Ending Cash:        ${total_ending_capital:,.2f}")
+    print(f" Aggregate Net P&L:           ${aggregate_pnl:+,.2f} ({aggregate_pnl_pct:+.2f}%)")
+    print(f" Benchmark Average Return:    {avg_buy_hold_pct:+.2f}%")
+    print("-" * 92)
+    if spy_metrics:
+        print(f" Broad Market Beta (β vs SPY): {spy_metrics['beta']:.2f}")
+        print(f" Jensen's Alpha (α vs SPY):    {spy_metrics['alpha_pct']:+.2f}%")
+        print(f" SPY Benchmark Return:        {spy_metrics['bench_return_pct']:+.2f}%")
+    else:
+        print(f" Broad Market Beta (β vs SPY): N/A (Insufficient daily benchmark alignment)")
+    print("-" * 92)
+    print(f" Total Trades Executed:       {total_trade_count}")
+    print(f" Win Rate:                    {win_rate:.1f}% ({wins_count} W / {losses_count} L)")
+    print(f" Profit Factor:               {profit_factor:.2f} (Gross Profit: ${gross_profit:,.2f} / Gross Loss: ${gross_loss:,.2f})")
+    print(f" Max Portfolio Drawdown:      -${portfolio_max_dd_dollars:,.2f} (-{portfolio_max_dd_pct:.2f}%)")
+    print(f" Portfolio Sharpe Ratio:      {portfolio_sharpe:.2f}")
+    print("=" * 92 + "\n")
 
     run_monte_carlo_simulation(
         all_trades=all_trades, 
