@@ -1,35 +1,39 @@
 import os
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from webull.core.client import ApiClient
 from webull.data.data_client import DataClient
 from webull.data.common.category import Category
 from webull.data.common.timespan import Timespan
-# Note: If your SDK layout requires trade client operations for live execution, 
-# you would import: from webull.trade.trade_client import TradeClient
 
-# Load keys from your hidden .env file
+# Import strategies
+import breakout
+
+# Active strategy selection & configuration
+ACTIVE_STRATEGY = breakout.analyze
+STRATEGY_PARAMS = {
+    "lookback": 20,       # Bars for Resistance (Entry)
+    "exit_lookback": 10   # Bars for Support (Exit)
+}
+
+# Load keys from hidden .env file
 load_dotenv()
 
 # =====================================================================
 # 1. PARAMETERS & SIMULATION SPEED/RESOLUTION CONTROLS
 # =====================================================================
-EXECUTION_MODE = "PAPER"       # 🛡️ Set to "PAPER" for safe local simulation or "LIVE" for Webull API
-TARGET_SYMBOL = "GRAB"          # Target ticker asset
+EXECUTION_MODE = "PAPER"       # 🛡️ Set to "PAPER" for local simulation or "LIVE" for Webull API
+TARGET_SYMBOL = "NVDA"         # Target ticker asset
 
 # ---- TIME-STEP CONTROLS ----
-# Adjust how fast the script processes ticks (in real-world seconds)
-SIMULATION_SPEED = 1         # e.g., 0.5 means wait half a second between ticks
-
-# Adjust the resolution of each data point (How much market time elapses per tick)
-# Available options: "M1" (1 min), "M5" (5 min), "M15" (15 min), "M30" (30 min), "H1" (1 hour), "D1" (1 day)
-BAR_RESOLUTION = "M5"          
+SIMULATION_SPEED = 1           # Real-world delay (in seconds) between ticks
+BAR_RESOLUTION = "M5"          # "M1", "M5", "M15", "M30", "H1", "D1"
 
 # ---- HIERARCHY OVERRIDES ----
-SPECIFIED_DATE = "2026-07-13"          # Format: "YYYY-MM-DD"
-SPECIFIED_TIME = "14:30:34"          # Format: "HH:MM:SS"
+SPECIFIED_DATE = "2026-07-13"  # Format: "YYYY-MM-DD" or None
+SPECIFIED_TIME = "14:30:34"    # Format: "HH:MM:SS" or None
 
 # Local virtual wallet tracking for safe paper testing
 local_portfolio = {
@@ -53,10 +57,8 @@ def get_webull_timespan(resolution_str):
         elif res_upper == "M5": return Timespan.M5
         elif res_upper == "M15": return Timespan.M15
         elif res_upper == "M30": return Timespan.M30
-        elif res_upper == "H1": 
-            return getattr(Timespan, "H1", Timespan.M1) 
-        elif res_upper == "D1": 
-            return getattr(Timespan, "D1", Timespan.M1)
+        elif res_upper == "H1": return getattr(Timespan, "H1", Timespan.M1) 
+        elif res_upper == "D1": return getattr(Timespan, "D1", Timespan.M1)
     except AttributeError:
         print(f"⚠️ Warning: Timespan configuration '{resolution_str}' not explicitly exposed by SDK. Falling back to M1.")
         
@@ -69,11 +71,11 @@ def parse_webull_time(time_value):
             time_value = time_value[:-5] + "+00:00"
         return datetime.fromisoformat(time_value)
     else:
-        return datetime.fromtimestamp(int(time_value) / 1000)
+        return datetime.fromtimestamp(int(time_value) / 1000, tz=timezone.utc)
 
 def get_last_market_day():
     """Calculates the date string of the most recent weekday."""
-    today = datetime.now()
+    today = datetime.now(timezone.utc)
     if today.weekday() == 5:    # Saturday -> Friday
         target = today - timedelta(days=1)
     elif today.weekday() == 6:  # Sunday -> Friday
@@ -82,15 +84,22 @@ def get_last_market_day():
         target = today
     return target.strftime("%Y-%m-%d")
 
+def format_candle(raw_bar):
+    """Standardizes raw Webull API responses into unified dictionary schema."""
+    bar_dt = parse_webull_time(raw_bar['time'])
+    return {
+        "datetime": bar_dt,
+        "open": float(raw_bar.get('open', raw_bar['close'])),
+        "high": float(raw_bar.get('high', raw_bar['close'])),
+        "low": float(raw_bar.get('low', raw_bar['close'])),
+        "close": float(raw_bar['close']),
+        "volume": float(raw_bar.get('volume', 0))
+    }
+
 def execute_order(symbol, action, quantity, current_price):
-    """
-    Acts as a hard safety gateway. Handles paper trading locally in-memory 
-    and completely blocks any outbound Webull API live orders unless 
-    EXECUTION_MODE is explicitly set to "LIVE".
-    """
+    """Acts as a safety gateway for Paper & Live executions."""
     global local_portfolio
-    
-    action = action.upper()  # "BUY" or "SELL"
+    action = action.upper()
     total_cost = current_price * quantity
     
     # -----------------------------------------------------------------
@@ -103,20 +112,20 @@ def execute_order(symbol, action, quantity, current_price):
             if local_portfolio["cash"] >= total_cost:
                 local_portfolio["cash"] -= total_cost
                 local_portfolio["positions"][symbol] = local_portfolio["positions"].get(symbol, 0) + quantity
-                print(f"✅ PAPER SUCCESS | Bought {quantity} shares. New Cash Balance: ${local_portfolio['cash']:.2f}")
+                print(f"✅ PAPER SUCCESS | Bought {quantity} shares. Cash: ${local_portfolio['cash']:.2f} | Holding: {local_portfolio['positions'][symbol]} shares")
             else:
                 print(f"❌ PAPER REJECTED | Insufficient Cash. Needed: ${total_cost:.2f}, Available: ${local_portfolio['cash']:.2f}")
                 
         elif action == "SELL":
             current_holding = local_portfolio["positions"].get(symbol, 0)
-            if current_holding >= quantity:
+            if current_holding >= quantity and quantity > 0:
                 local_portfolio["positions"][symbol] -= quantity
                 local_portfolio["cash"] += total_cost
-                print(f"✅ PAPER SUCCESS | Sold {quantity} shares. New Cash Balance: ${local_portfolio['cash']:.2f}")
+                print(f"✅ PAPER SUCCESS | Sold {quantity} shares. Cash: ${local_portfolio['cash']:.2f}")
                 if local_portfolio["positions"][symbol] == 0:
                     del local_portfolio["positions"][symbol]
             else:
-                print(f"❌ PAPER REJECTED | Insufficient Shares. Trying to sell {quantity}, but only hold {current_holding}.")
+                print(f"❌ PAPER REJECTED | Insufficient Shares. Holding: {current_holding}, Requested: {quantity}")
         return True
 
     # -----------------------------------------------------------------
@@ -125,21 +134,6 @@ def execute_order(symbol, action, quantity, current_price):
     elif EXECUTION_MODE == "LIVE":
         print(f"\n[⚠️ LIVE EXECUTION] WARNING: Routing real order to Webull API | {action} {quantity} {symbol}...")
         try:
-            # Structuring the payload following typical Webull OpenAPI v2 schemas
-            # client_order_id = uuid.uuid4().hex
-            # new_order = {
-            #     "client_order_id": client_order_id,
-            #     "symbol": symbol,
-            #     "instrument_type": "EQUITY",
-            #     "market": "US",
-            #     "order_type": "MARKET",
-            #     "quantity": str(quantity),
-            #     "side": action,
-            #     "time_in_force": "DAY",
-            #     "entrust_type": "QTY",
-            #     "support_trading_session": "CORE"
-            # }
-            # res = trade_client.order_v2.place_order(account_id="YOUR_ACCOUNT", new_orders=new_order)
             print("⚡ Webull Live API endpoint execution skipped (Safe placeholder bypass).")
             return True
         except Exception as api_err:
@@ -147,7 +141,7 @@ def execute_order(symbol, action, quantity, current_price):
             return False
             
     else:
-        raise ValueError(f"Unknown EXECUTION_MODE: '{EXECUTION_MODE}'. Order blocked for absolute safety.")
+        raise ValueError(f"Unknown EXECUTION_MODE: '{EXECUTION_MODE}'. Order blocked for safety.")
 
 # =====================================================================
 # 3. ENGINE ENTRYPOINT
@@ -156,109 +150,144 @@ def execute_order(symbol, action, quantity, current_price):
 print(f"Initializing Webull Routing Engine... Mode: [{EXECUTION_MODE}]")
 
 try:
-    # Build connection using live data endpoints
+    # Initialize connection using Webull endpoints
     api_client = ApiClient(APP_KEY, APP_SECRET, REGION)
     api_client.add_endpoint(REGION, "api.webull.com")
     data_client = DataClient(api_client)
     print("Handshake successful! Market data channel linked.")
 
-    # Select timespan safely
     selected_timespan = get_webull_timespan(BAR_RESOLUTION)
 
-    # Assess Hierarchy State Step-by-Step
     print(f"Evaluating hierarchy rules for [{TARGET_SYMBOL}] at [{BAR_RESOLUTION}] resolution...")
     res = data_client.market_data.get_history_bar(TARGET_SYMBOL, Category.US_STOCK.name, selected_timespan.name, count="1200")
     
     if res.status_code != 200 or not res.json():
         raise Exception(f"Failed to fetch baseline tracking bars. Status: {res.status_code}")
         
-    all_bars = res.json()
-    latest_candle = all_bars[-1]
-    latest_candle_time_dt = parse_webull_time(latest_candle['time'])
+    all_raw_bars = res.json()
     
-    is_market_currently_open = (datetime.now().timestamp() - latest_candle_time_dt.timestamp()) < 900
+    # Standardize candles and sort chronologically (oldest -> newest)
+    formatted_bars = [format_candle(b) for b in all_raw_bars]
+    formatted_bars.sort(key=lambda x: x['datetime'])
+    
+    latest_candle_time_dt = formatted_bars[-1]["datetime"]
+    
+    # Timezone-safe timestamp comparison (UTC vs UTC)
+    now_utc_ts = datetime.now(timezone.utc).timestamp()
+    is_market_currently_open = (now_utc_ts - latest_candle_time_dt.timestamp()) < 900
     has_date_override = SPECIFIED_DATE is not None
 
     # =====================================================================
-    # HIERARCHY LEVEL 1: LIVE DATA STREAM (Only loops if LIVE mode + Open Market)
+    # HIERARCHY LEVEL 1: LIVE DATA STREAM
     # =====================================================================
     if is_market_currently_open and EXECUTION_MODE == "LIVE" and not has_date_override:
-        print(f"➡️ [HIERARCHY 1] Market is OPEN. Launching real-time streaming feed at [{BAR_RESOLUTION}] tracking cycles...")
+        print(f"➡️ [HIERARCHY 1] Market OPEN. Launching real-time streaming feed...")
+        
+        # Pre-seed buffer with last 50 historical bars before going live
+        rolling_live_buffer = formatted_bars[-50:]
+        
         while True:
             live_res = data_client.market_data.get_history_bar(TARGET_SYMBOL, Category.US_STOCK.name, selected_timespan.name)
             if live_res.status_code == 200 and live_res.json():
-                latest_bar = live_res.json()[-1]
-                current_price = float(latest_bar['close'])
-                time_str = parse_webull_time(latest_bar['time']).strftime("%H:%M:%S")
-                print(f"🟢 LIVE STREAM | {time_str} | {TARGET_SYMBOL}: ${current_price:.2f}")
+                latest_bar = format_candle(live_res.json()[-1])
                 
-                # --- Example live strategy hook ---
-                # should_buy = check_strategy_logic(current_price)
-                # if should_buy:
-                #     execute_order(TARGET_SYMBOL, "BUY", 5, current_price)
+                rolling_live_buffer.append(latest_bar)
+                current_price = latest_bar['close']
+                time_str = latest_bar['datetime'].strftime("%H:%M:%S")
+                
+                # Fetch position state
+                current_shares = local_portfolio["positions"].get(TARGET_SYMBOL, 0)
+                
+                # Delegate to strategy
+                signal_result = ACTIVE_STRATEGY(
+                    rolling_live_buffer, 
+                    **STRATEGY_PARAMS, 
+                    current_position=current_shares
+                )
+                action_signal = signal_result.get("signal", "HOLD")
+                reason = signal_result.get("reason", "")
+
+                print(f"🟢 LIVE STREAM | {time_str} | {TARGET_SYMBOL}: ${current_price:.2f} | Position: {current_shares} | Signal: {action_signal} ({reason})")
+                
+                # Execute orders
+                if action_signal == "BUY":
+                    execute_order(TARGET_SYMBOL, "BUY", 10, current_price)
+                elif action_signal == "SELL" and current_shares > 0:
+                    execute_order(TARGET_SYMBOL, "SELL", current_shares, current_price)
             
             sleep_duration = 60 if BAR_RESOLUTION == "M1" else 10
             time.sleep(sleep_duration)
 
     # =====================================================================
-    # HISTORICAL PACKET PARSING (Runs if Market is Closed OR if Mode is PAPER)
+    # HISTORICAL REPLAY / BACKTEST ENGINE
     # =====================================================================
     else:
         if EXECUTION_MODE == "PAPER" and is_market_currently_open:
-            print(f"ℹ️ Market is currently open, but running in PAPER simulation mode as configured.")
+            print(f"ℹ️ Market is open, running local PAPER simulation mode.")
 
-        if has_date_override:
-            target_date_str = SPECIFIED_DATE
-            mode_msg = f"[HIERARCHY 4] starting at {SPECIFIED_TIME}" if SPECIFIED_TIME else "[HIERARCHY 3] starting at Market Open"
-            print(f"➡️ {mode_msg} on explicit date [{target_date_str}]...")
+        target_date_str = SPECIFIED_DATE if has_date_override else get_last_market_day()
+        print(f"➡️ Replay Router Active. Target Session: [{target_date_str}]...")
+
+        # Locate cutoff index for session walk
+        start_index = None
+        if SPECIFIED_TIME and has_date_override:
+            time_cutoff = datetime.strptime(f"{target_date_str} {SPECIFIED_TIME}", "%Y-%m-%d %H:%M:%S")
+            for idx, bar in enumerate(formatted_bars):
+                bar_dt_naive = bar['datetime'].replace(tzinfo=None)
+                if bar_dt_naive >= time_cutoff:
+                    start_index = idx
+                    break
         else:
-            target_date_str = get_last_market_day()
-            print(f"➡️ [HIERARCHY 2] Replay Router Active. Target Session: [{target_date_str}]...")
+            for idx, bar in enumerate(formatted_bars):
+                if bar['datetime'].strftime("%Y-%m-%d") == target_date_str:
+                    start_index = idx
+                    break
 
-        # Segment and process candles chronologically
-        session_bars = []
-        for bar in all_bars:
-            bar_datetime = parse_webull_time(bar['time'])
-            bar_date_str = bar_datetime.strftime("%Y-%m-%d")
-            
-            if bar_date_str == target_date_str:
-                if SPECIFIED_TIME and has_date_override:
-                    # 1. Parse your custom cut-off time as naive first
-                    naive_cutoff = datetime.strptime(f"{target_date_str} {SPECIFIED_TIME}", "%Y-%m-%d %H:%M:%S")
-                    # 2. Dynamically attach the exact timezone matching Webull's candle data
-                    time_cutoff = naive_cutoff.replace(tzinfo=bar_datetime.tzinfo)
-                    
-                    if bar_datetime < time_cutoff:
-                        continue
-                session_bars.append((bar_datetime, float(bar['close'])))
-        
-        session_bars.sort(key=lambda x: x[0])
+        # Fallback if specific date/time was not found in returned history
+        if start_index is None:
+            print("⚠️ Selected target window was not found in buffer. Falling back to last 200 bars...")
+            start_index = max(0, len(formatted_bars) - 200)
 
-        if not session_bars:
-            print("⚠️ Date parsing fell outside core buffer timeline. re-aligning tracking windows...")
-            for bar in all_bars[-200:]:
-                session_bars.append((parse_webull_time(bar['time']), float(bar['close'])))
+        # Extract pre-seeded historical bars (up to 50 preceding bars)
+        seed_start = max(0, start_index - 50)
+        rolling_candle_buffer = formatted_bars[seed_start:start_index]
 
-        print(f"📊 Ready. Simulation contains {len(session_bars)} points at [{BAR_RESOLUTION}] interval resolution.")
-        print(f"⏱️ Pacing Speed: Processing 1 data point every {SIMULATION_SPEED} real seconds.\n")
-        
-        # 4. Controlled Backtest Walk Loop
-        for bar_time, current_price in session_bars:
-            time_str = bar_time.strftime("%Y-%m-%d %H:%M:%S")
-            print(f"🟡 REPLAY SIMULATION | {time_str} | {TARGET_SYMBOL}: ${current_price:.2f}")
+        # Extract simulation loop bars
+        session_bars = formatted_bars[start_index:]
+
+        print(f"📊 Ready. Seeded buffer with {len(rolling_candle_buffer)} bars. Simulation contains {len(session_bars)} points.")
+        print(f"⏱️ Pacing Speed: Processing 1 point every {SIMULATION_SPEED} real seconds.\n")
+
+        for bar_data in session_bars:
+            current_price = bar_data['close']
+            time_str = bar_data['datetime'].strftime("%Y-%m-%d %H:%M:%S")
+
+            # Push active bar into rolling buffer
+            rolling_candle_buffer.append(bar_data)
             
-            # --- STRATEGY TEST HOOK ---
-            # To test your execution logic, change this flag to True:
-            should_trigger_buy = False  
+            # Fetch position state from portfolio
+            current_shares = local_portfolio["positions"].get(TARGET_SYMBOL, 0)
             
-            if should_trigger_buy:
-                # This call handles all wallet transactions completely in memory safely
+            # Compute strategy signal
+            signal_result = ACTIVE_STRATEGY(
+                rolling_candle_buffer, 
+                **STRATEGY_PARAMS, 
+                current_position=current_shares
+            )
+            action_signal = signal_result.get("signal", "HOLD")
+            reason = signal_result.get("reason", "")
+
+            print(f"🟡 REPLAY SIMULATION | {time_str} | {TARGET_SYMBOL}: ${current_price:.2f} | Position: {current_shares} | Signal: {action_signal} ({reason})")
+            
+            # Execute trade actions
+            if action_signal == "BUY":
                 execute_order(symbol=TARGET_SYMBOL, action="BUY", quantity=10, current_price=current_price)
+            elif action_signal == "SELL" and current_shares > 0:
+                execute_order(symbol=TARGET_SYMBOL, action="SELL", quantity=current_shares, current_price=current_price)
             
-            # Apply your configurable delay pacing
             time.sleep(SIMULATION_SPEED)
             
-        print("\n🏁 Playback pipeline timeline exhaustion reached.")
+        print("\n🏁 Playback timeline completed.")
 
 except KeyboardInterrupt:
     print("\nStopping safe execution router loop. Session terminated.")
