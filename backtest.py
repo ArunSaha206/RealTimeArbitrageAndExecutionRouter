@@ -3,96 +3,34 @@ import math
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import databento as db
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
-from webull.core.client import ApiClient
-from webull.data.data_client import DataClient
-from webull.data.common.category import Category
-from webull.data.common.timespan import Timespan
 
-# Control center owns: which strategy, which tickers, bar resolution,
-# starting cash, days to test, risk-free rate.
+# Control center owns: which strategy, which tickers, bar resolution, etc.
 import BacktestControlCenter as control
-
-# =====================================================================
-# 1. BACKTEST CONFIGURATION
-# =====================================================================
-# Everything below is sourced from BacktestControlCenter.py. Nothing
-# strategy-specific (bar resolution, sizing mode, fixed share qty,
-# lookback windows) lives here anymore -- that's owned by
-# control.ACTIVE_STRATEGY itself via its get_params() function.
-STARTING_CASH_PER_TICKER = control.STARTING_CASH_PER_TICKER
-DAYS_TO_TEST = control.DAYS_TO_TEST
-RISK_FREE_RATE = control.RISK_FREE_RATE
-ACTIVE_UNIVERSE = control.ACTIVE_UNIVERSE
-strategy = control.ACTIVE_STRATEGY
 
 # Load API environment variables
 load_dotenv()
-APP_KEY = os.environ.get("WEBULL_APP_KEY")
-APP_SECRET = os.environ.get("WEBULL_APP_SECRET")
-REGION = os.environ.get("WEBULL_REGION_ID", "us")
 
 # =====================================================================
-# 2. HELPER & DATA FORMATTING FUNCTIONS
+# 1. HELPER & METRIC FUNCTIONS
 # =====================================================================
-
-def get_webull_timespan(resolution_str):
-    """Maps resolution strings to Webull Timespan objects."""
-    res_upper = resolution_str.upper()
-    try:
-        if res_upper == "M1": return Timespan.M1
-        elif res_upper == "M5": return Timespan.M5
-        elif res_upper == "M15": return Timespan.M15
-        elif res_upper == "M30": return Timespan.M30
-        elif res_upper == "H1": return getattr(Timespan, "H1", Timespan.M1)
-        elif res_upper == "D1": return getattr(Timespan, "D1", Timespan.M1)
-    except AttributeError:
-        pass
-    return Timespan.M1
 
 # Bars per year assumes ~250 US trading days/year, 6.5hr (390min) session.
 BARS_PER_YEAR_BY_RESOLUTION = {
-    "M1": 390 * 250,       # 97,500
-    "M5": 78 * 250,        # 19,500
-    "M15": 26 * 250,       # 6,500
-    "M30": 13 * 250,       # 3,250
-    "H1": 7 * 250,         # 1,750 (6.5hr session rounded up to 7 bars/day)
-    "D1": 250,             # 250
+    "M1": 390 * 250,       
+    "M5": 78 * 250,        
+    "M15": 26 * 250,       
+    "M30": 13 * 250,       
+    "H1": 7 * 250,         
+    "D1": 250,             
 }
 
 def get_periods_per_year(resolution_str, default=19500):
-    """
-    Maps a bar resolution string to the number of bars/year used to
-    annualize the Sharpe ratio. This MUST match whatever bar_resolution
-    the active strategy is actually trading on -- annualizing M5 returns
-    with an M1 scaling factor (or vice versa) silently produces a wrong
-    Sharpe ratio.
-    """
     return BARS_PER_YEAR_BY_RESOLUTION.get(str(resolution_str).upper(), default)
 
-def parse_webull_time(time_value):
-    """Converts Webull timestamp to UTC-aware datetime."""
-    if isinstance(time_value, str):
-        if time_value.endswith("+0000"):
-            time_value = time_value[:-5] + "+00:00"
-        return datetime.fromisoformat(time_value)
-    else:
-        return datetime.fromtimestamp(int(time_value) / 1000, tz=timezone.utc)
-
-def format_candle(raw_bar):
-    """Standardizes raw candle data."""
-    return {
-        "datetime": parse_webull_time(raw_bar['time']),
-        "open": float(raw_bar.get('open', raw_bar['close'])),
-        "high": float(raw_bar.get('high', raw_bar['close'])),
-        "low": float(raw_bar.get('low', raw_bar['close'])),
-        "close": float(raw_bar['close']),
-        "volume": float(raw_bar.get('volume', 0))
-    }
-
 def calculate_max_drawdown(equity_curve):
-    """Calculates peak-to-trough max dollar and percentage drawdown."""
     peak = equity_curve[0] if len(equity_curve) > 0 else 0
     max_dd_dollars = 0.0
     max_dd_pct = 0.0
@@ -111,7 +49,6 @@ def calculate_max_drawdown(equity_curve):
     return max_dd_dollars, max_dd_pct
 
 def calculate_sharpe_ratio(equity_curve, periods_per_year=19500):
-    """Calculates annualized Sharpe Ratio from intra-bar equity returns."""
     if len(equity_curve) < 2:
         return 0.0
 
@@ -121,14 +58,13 @@ def calculate_sharpe_ratio(equity_curve, periods_per_year=19500):
     if len(returns) == 0 or np.std(returns) == 0:
         return 0.0
 
-    rf_per_period = (1 + RISK_FREE_RATE)**(1 / periods_per_year) - 1
+    rf_per_period = (1 + control.RISK_FREE_RATE)**(1 / periods_per_year) - 1
     excess_returns = returns - rf_per_period
 
     sharpe = np.mean(excess_returns) / np.std(excess_returns) * np.sqrt(periods_per_year)
     return float(sharpe)
 
 def get_beta_and_alpha(strategy_daily_returns, benchmark_symbol="SPY", risk_free_rate_annual=0.04):
-    """Computes Beta (β) and Period Jensen's Alpha (α) against a target benchmark."""
     if strategy_daily_returns.empty or len(strategy_daily_returns) < 3:
         return None
 
@@ -149,7 +85,6 @@ def get_beta_and_alpha(strategy_daily_returns, benchmark_symbol="SPY", risk_free
     if bench_data.empty:
         return None
 
-    # Handle MultiIndex and single-level column structures from yfinance
     if isinstance(bench_data.columns, pd.MultiIndex):
         if 'Close' in bench_data.columns.get_level_values(0):
             bench_close = bench_data['Close']
@@ -186,9 +121,6 @@ def get_beta_and_alpha(strategy_daily_returns, benchmark_symbol="SPY", risk_free
     strat_period_return = (1 + aligned['strategy']).prod() - 1
     bench_period_return = (1 + aligned['benchmark']).prod() - 1
 
-    # Use the ACTUAL aligned date range (post-intersection/dropna), not the
-    # pre-alignment strategy-only range -- otherwise the risk-free rate gets
-    # compounded over a different window than the returns being compared.
     aligned_min_date = aligned.index.min()
     aligned_max_date = aligned.index.max()
     num_days = max((aligned_max_date - aligned_min_date).days, 1)
@@ -205,7 +137,6 @@ def get_beta_and_alpha(strategy_daily_returns, benchmark_symbol="SPY", risk_free
     }
 
 def print_trade_log(trades, title="EXECUTED TRADES LOG"):
-    """Formats and prints detailed individual trade information."""
     if not trades:
         print(f"\n--- {title} ---")
         print("No trades executed.")
@@ -224,41 +155,132 @@ def print_trade_log(trades, title="EXECUTED TRADES LOG"):
         print(f"{i:<4} | {t['symbol']:<7} | {entry_str:<19} | {exit_str:<19} | {t['quantity']:<5} | ${t['entry_price']:<8.2f} | ${t['exit_price']:<8.2f} | ${t['pnl_dollars']:>+8.2f} | {t['pnl_pct']:>+7.2f}% | {t['bars_held']:<5}")
     print("=" * 115)
 
+
+# =====================================================================
+# 2. DEEP HISTORY DATA FETCHER
+# =====================================================================
+
+# Make sure this directory exists to store your free cached data
+CACHE_DIR = "data_cache"
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
+
+# =====================================================================
+# 2. DEEP HISTORY DATA FETCHER (DATABENTO)
+# =====================================================================
+
+def fetch_deep_history(symbol, resolution, start_date_str, end_date_str, provider="DATABENTO"):
+    """
+    Fetches historical OHLCV data, caches it locally to prevent duplicate API charges, 
+    and resamples it to the strategy's required timeframe.
+    """
+    formatted_bars = []
+    
+    if provider == "DATABENTO":
+        # 1. Check if we already downloaded this data to save money
+        # Databento's native schema is 1-minute (ohlcv-1m). We will cache the 1m data 
+        # so you can reuse it later even if you change your strategy to M15 or H1.
+        cache_file = os.path.join(CACHE_DIR, f"{symbol}_{start_date_str}_{end_date_str}_1m.parquet")
+        
+        if os.path.exists(cache_file):
+            df = pd.read_parquet(cache_file)
+        else:
+            # 2. If no cache exists, initialize client and fetch from Databento
+            db_key = os.environ.get("DATABENTO_API_KEY")
+            if not db_key:
+                print("❌ ERROR: DATABENTO_API_KEY not found in .env file.")
+                return []
+                
+            try:
+                client = db.Historical(db_key)
+                
+                # Fetching XNAS.ITCH (Nasdaq TotalView-ITCH) for US Equities
+                raw_data = client.timeseries.get_range(
+                    dataset="XNAS.ITCH",
+                    schema="ohlcv-1m",
+                    symbols=symbol,
+                    start=start_date_str,
+                    end=end_date_str,
+                )
+                
+                df = raw_data.to_df()
+                
+                if df.empty:
+                    return []
+                    
+                # Save to local cache for future free backtests
+                df.to_parquet(cache_file)
+                
+            except Exception as e:
+                # Catch invalid symbols or dates gracefully so the backtest doesn't crash
+                print(f"\n⚠️ API Error for {symbol}: {e}")
+                return []
+
+        # 3. Resample the 1-minute data to match your strategy's resolution
+        # Databento's index is typically a UTC timestamp.
+        # Ensure it is timezone-aware for your backtester.
+        if df.index.tz is None:
+            df.index = df.index.tz_localize('UTC')
+
+        resample_map = {
+            "M1": "1min",
+            "M5": "5min",
+            "M15": "15min",
+            "M30": "30min",
+            "H1": "1h",
+            "D1": "1D"
+        }
+        pd_resolution = resample_map.get(resolution.upper(), "1min")
+        
+        # Aggregate 1-minute bars into the target timeframe (e.g., 5-minute bars)
+        resampled_df = df.resample(pd_resolution).agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
+        
+        # 4. Format into the exact list of dictionaries expected by your backtester
+        for dt, row in resampled_df.iterrows():
+            formatted_bars.append({
+                "datetime": dt.to_pydatetime(),
+                "open": float(row['open']),
+                "high": float(row['high']),
+                "low": float(row['low']),
+                "close": float(row['close']),
+                "volume": float(row['volume'])
+            })
+            
+    return formatted_bars
+
+
 # =====================================================================
 # 3. SINGLE-TICKER BACKTEST ENGINE
 # =====================================================================
 
-def backtest_single_symbol(symbol, data_client, timespan, strategy_config):
-    """Runs backtest logic on a single ticker and captures detailed trade records.
-
-    strategy_config is whatever strategy.get_params() returned -- this
-    function never hardcodes lookback/sizing values itself.
-    """
-    res = data_client.market_data.get_history_bar(
-        symbol,
-        Category.US_STOCK.name,
-        timespan.name,
-        count="1200"
+def backtest_single_symbol(symbol, start_date, end_date, strategy_config):
+    """Runs backtest logic on a single ticker for a specific historical window."""
+    
+    formatted_bars = fetch_deep_history(
+        symbol=symbol,
+        resolution=strategy_config["bar_resolution"],
+        start_date_str=start_date,
+        end_date_str=end_date,
+        provider=control.HISTORICAL_PROVIDER
     )
 
-    if res.status_code != 200 or not res.json():
-        print(f"⚠️ Warning: Failed to fetch market data for [{symbol}]. Skipping.")
+    if not formatted_bars:
+        # Silently skip if no data (avoids terminal clutter during mocked tests)
         return None
 
-    raw_bars = res.json()
-    formatted_bars = [format_candle(b) for b in raw_bars]
     formatted_bars.sort(key=lambda x: x['datetime'])
-
-    if DAYS_TO_TEST is not None:
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=DAYS_TO_TEST)
-        formatted_bars = [b for b in formatted_bars if b['datetime'] >= cutoff_date]
 
     lookback_window = strategy_config["lookback"]
     if len(formatted_bars) <= lookback_window:
-        print(f"⚠️ Warning: Insufficient data for [{symbol}] ({len(formatted_bars)} bars). Skipping.")
         return None
 
-    cash = STARTING_CASH_PER_TICKER
+    cash = control.STARTING_CASH_PER_TICKER
     position_qty = 0
     entry_price = 0.0
     entry_time = None
@@ -280,7 +302,7 @@ def backtest_single_symbol(symbol, data_client, timespan, strategy_config):
         equity_curve.append(portfolio_value)
         timestamps.append(current_dt)
 
-        signal_result = strategy.analyze(
+        signal_result = control.ACTIVE_STRATEGY.analyze(
             rolling_buffer,
             lookback=strategy_config["lookback"],
             exit_lookback=strategy_config["exit_lookback"],
@@ -291,7 +313,6 @@ def backtest_single_symbol(symbol, data_client, timespan, strategy_config):
         # --- EXECUTE BUY SIGNAL ---
         if signal == "BUY" and position_qty == 0:
             mode = str(strategy_config["position_mode"]).upper().replace("_", "").strip()
-
             if mode == "ALLIN":
                 shares_to_buy = int(cash // current_price) if current_price > 0 else 0
             else:
@@ -351,8 +372,8 @@ def backtest_single_symbol(symbol, data_client, timespan, strategy_config):
 
     # Performance metric evaluations
     final_balance = cash
-    total_net_pnl = final_balance - STARTING_CASH_PER_TICKER
-    total_net_pnl_pct = (total_net_pnl / STARTING_CASH_PER_TICKER) * 100
+    total_net_pnl = final_balance - control.STARTING_CASH_PER_TICKER
+    total_net_pnl_pct = (total_net_pnl / control.STARTING_CASH_PER_TICKER) * 100
 
     start_stock_price = formatted_bars[lookback_window]['close']
     end_stock_price = formatted_bars[-1]['close']
@@ -370,7 +391,7 @@ def backtest_single_symbol(symbol, data_client, timespan, strategy_config):
     single_beta_metrics = get_beta_and_alpha(
         single_daily_returns,
         benchmark_symbol=symbol,
-        risk_free_rate_annual=RISK_FREE_RATE
+        risk_free_rate_annual=control.RISK_FREE_RATE
     )
 
     return {
@@ -395,7 +416,6 @@ def backtest_single_symbol(symbol, data_client, timespan, strategy_config):
 # =====================================================================
 
 def run_monte_carlo_simulation(all_trades, starting_capital, avg_buy_hold_pct=0.0, spy_return_pct=None, num_simulations=1000, ruin_threshold_pct=20.0):
-    """Runs Monte Carlo risk, streak, and benchmark outperformance simulations."""
     if not all_trades:
         print("⚠️ No trades available for Monte Carlo simulation.")
         return
@@ -407,7 +427,6 @@ def run_monte_carlo_simulation(all_trades, starting_capital, avg_buy_hold_pct=0.
     max_drawdowns_pct = []
     max_consecutive_losses_list = []
     ruin_count = 0
-
     beat_bh_count = 0
     beat_spy_count = 0
 
@@ -448,7 +467,6 @@ def run_monte_carlo_simulation(all_trades, starting_capital, avg_buy_hold_pct=0.
 
         if sim_return_pct > avg_buy_hold_pct:
             beat_bh_count += 1
-
         if spy_return_pct is not None and sim_return_pct > spy_return_pct:
             beat_spy_count += 1
 
@@ -467,10 +485,8 @@ def run_monte_carlo_simulation(all_trades, starting_capital, avg_buy_hold_pct=0.
     p50_final = np.percentile(final_balances, 50)
     p75_final = np.percentile(final_balances, 75)
     p95_final = np.percentile(final_balances, 95)
-
     p50_dd = np.percentile(max_drawdowns_pct, 50)
     p95_dd = np.percentile(max_drawdowns_pct, 95)
-
     p50_streak = int(np.percentile(max_consecutive_losses_list, 50))
     p95_streak = int(np.percentile(max_consecutive_losses_list, 95))
 
@@ -498,130 +514,135 @@ def run_monte_carlo_simulation(all_trades, starting_capital, avg_buy_hold_pct=0.
     print("=" * 115 + "\n")
 
 # =====================================================================
-# 5. MULTI-TICKER RUNNER & AGGREGATOR
+# 5. MULTI-TICKER RUNNER & REGIME AGGREGATOR
 # =====================================================================
 
 def run_backtest():
-    strategy_config = strategy.get_params()
+    strategy_config = control.ACTIVE_STRATEGY.get_params()
     bar_resolution = strategy_config["bar_resolution"]
 
-    print(f"🚀 Initializing Multi-Ticker Backtest Engine...")
-    print(f"⚙️ Engine Config: Days Back={DAYS_TO_TEST} | Cash/Ticker=${STARTING_CASH_PER_TICKER:,.2f}")
-    print(f"🧠 Strategy: {strategy.__name__} | Resolution={bar_resolution} | Lookback={strategy_config['lookback']} | Exit Lookback={strategy_config['exit_lookback']} | Sizing={strategy_config['position_mode']}")
-    print(f"📋 Target Universe ({len(ACTIVE_UNIVERSE)} symbols): {', '.join(ACTIVE_UNIVERSE)}\n")
+    print(f"🚀 Initializing Multi-Regime Backtest Engine...")
+    print(f"⚙️ Cash/Ticker: ${control.STARTING_CASH_PER_TICKER:,.2f} | Provider: {control.HISTORICAL_PROVIDER}")
+    print(f"🧠 Strategy: {control.ACTIVE_STRATEGY.__name__} | Res={bar_resolution} | Lookback={strategy_config['lookback']} | Exit={strategy_config['exit_lookback']} | Sizing={strategy_config['position_mode']}")
+    print(f"📋 Active Asset Class: {control.ACTIVE_ASSET_TYPE}\n")
 
-    api_client = ApiClient(APP_KEY, APP_SECRET, REGION)
-    api_client.add_endpoint(REGION, "api.webull.com")
-    data_client = DataClient(api_client)
+    # Define execution regimes. Fallback to DAYS_TO_TEST if REGIME_WINDOWS is explicitly None.
+    regimes = control.REGIME_WINDOWS
+    if not regimes:
+        end_date = datetime.now(timezone.utc)
+        start_date = end_date - timedelta(days=control.DAYS_TO_TEST)
+        regimes = {
+            "recent_days": {
+                "start": start_date.strftime("%Y-%m-%d"),
+                "end": end_date.strftime("%Y-%m-%d"),
+                control.ACTIVE_ASSET_TYPE.lower(): control.ACTIVE_UNIVERSE
+            }
+        }
 
-    timespan = get_webull_timespan(bar_resolution)
+    # Execute simulation strictly isolated by regime window
+    for regime_name, config in regimes.items():
+        print("=" * 115)
+        print(f" 📅 EXECUTING REGIME: {regime_name.upper()} ({config['start']} to {config['end']})")
+        print("=" * 115)
 
-    all_results = []
-    all_trades = []
+        all_results = []
+        all_trades = []
+        
+        # 👉 EXTRACT THE CORRECT UNIVERSE BASED ON ASSET TOGGLE
+        target_universe = config.get(control.ACTIVE_ASSET_TYPE.lower(), [])
 
-    for idx, symbol in enumerate(ACTIVE_UNIVERSE, start=1):
-        print(f"[{idx}/{len(ACTIVE_UNIVERSE)}] Backtesting {symbol}...", end=" ", flush=True)
-        res = backtest_single_symbol(symbol, data_client, timespan, strategy_config)
-        if res:
-            all_results.append(res)
-            all_trades.extend(res["trades"])
-            print(f"Done. Net P&L: ${res['net_pnl']:+,.2f} ({res['net_pnl_pct']:+.2f}%) | Beta: {res['beta']:.2f} | Alpha: {res['alpha_pct']:+.2f}% | Trades: {len(res['trades'])}")
+        if not target_universe:
+            print(f"⚠️ No symbols found for '{control.ACTIVE_ASSET_TYPE}' in regime '{regime_name}'. Skipping.\n")
+            continue
 
-    if not all_results:
-        print("❌ No valid ticker data evaluated. Exiting backtest.")
-        return
+        for idx, symbol in enumerate(target_universe, start=1):
+            print(f"[{idx}/{len(target_universe)}] Backtesting {symbol}...", end=" ", flush=True)
+            res = backtest_single_symbol(symbol, config['start'], config['end'], strategy_config)
+            
+            if res:
+                all_results.append(res)
+                all_trades.extend(res["trades"])
+                print(f"Done. Net P&L: ${res['net_pnl']:+,.2f} ({res['net_pnl_pct']:+.2f}%) | Beta: {res['beta']:.2f} | Alpha: {res['alpha_pct']:+.2f}% | Trades: {len(res['trades'])}")
+            else:
+                print("Skipped (Insufficient Data/Fetch Failed)")
 
-    # =====================================================================
-    # 6. DETAILED TRADE LOG PRINTING
-    # =====================================================================
-    for r in all_results:
-        print_trade_log(r["trades"], title=f"Trade Log for [{r['symbol']}]")
+        if not all_results:
+            print(f"❌ No valid ticker data evaluated for {regime_name.upper()}. Moving to next regime.\n")
+            continue
 
-    sorted_all_trades = sorted(all_trades, key=lambda x: x["entry_time"])
-    print_trade_log(sorted_all_trades, title="Master Portfolio Consolidated Trade Log")
+        # =====================================================================
+        # REGIME DASHBOARD & SUMMARY
+        # =====================================================================
+        sorted_all_trades = sorted(all_trades, key=lambda x: x["entry_time"])
+        total_initial_capital = len(all_results) * control.STARTING_CASH_PER_TICKER
+        total_ending_capital = sum(r["final_balance"] for r in all_results)
+        aggregate_pnl = total_ending_capital - total_initial_capital
+        aggregate_pnl_pct = (aggregate_pnl / total_initial_capital) * 100
 
-    # =====================================================================
-    # 7. DASHBOARD & AGGREGATE SUMMARY
-    # =====================================================================
-    total_initial_capital = len(all_results) * STARTING_CASH_PER_TICKER
-    total_ending_capital = sum(r["final_balance"] for r in all_results)
-    aggregate_pnl = total_ending_capital - total_initial_capital
-    aggregate_pnl_pct = (aggregate_pnl / total_initial_capital) * 100
+        avg_buy_hold_pct = sum(r["buy_hold_pct"] for r in all_results) / len(all_results)
+        min_length = min(len(r["equity_curve"]) for r in all_results)
+        
+        combined_equity = np.zeros(min_length)
+        for r in all_results:
+            combined_equity += np.array(r["equity_curve"][:min_length])
 
-    avg_buy_hold_pct = sum(r["buy_hold_pct"] for r in all_results) / len(all_results)
+        combined_timestamps = all_results[0]["timestamps"][:min_length]
+        portfolio_df = pd.DataFrame({"datetime": combined_timestamps, "equity": combined_equity})
+        portfolio_df['date'] = pd.to_datetime(portfolio_df['datetime']).dt.date
+        daily_portfolio_equity = portfolio_df.groupby('date')['equity'].last()
+        portfolio_daily_returns = daily_portfolio_equity.pct_change().dropna()
 
-    min_length = min(len(r["equity_curve"]) for r in all_results)
-    combined_equity = np.zeros(min_length)
-    for r in all_results:
-        combined_equity += np.array(r["equity_curve"][:min_length])
+        spy_metrics = get_beta_and_alpha(
+            portfolio_daily_returns,
+            benchmark_symbol="SPY",
+            risk_free_rate_annual=control.RISK_FREE_RATE
+        )
 
-    combined_timestamps = all_results[0]["timestamps"][:min_length]
+        portfolio_max_dd_dollars, portfolio_max_dd_pct = calculate_max_drawdown(combined_equity)
+        portfolio_sharpe = calculate_sharpe_ratio(combined_equity, periods_per_year=get_periods_per_year(bar_resolution))
 
-    portfolio_df = pd.DataFrame({"datetime": combined_timestamps, "equity": combined_equity})
-    portfolio_df['date'] = pd.to_datetime(portfolio_df['datetime']).dt.date
-    daily_portfolio_equity = portfolio_df.groupby('date')['equity'].last()
-    portfolio_daily_returns = daily_portfolio_equity.pct_change().dropna()
+        winning_trades = [t for t in sorted_all_trades if t["pnl_dollars"] > 0]
+        losing_trades = [t for t in sorted_all_trades if t["pnl_dollars"] < 0]
 
-    spy_metrics = get_beta_and_alpha(
-        portfolio_daily_returns,
-        benchmark_symbol="SPY",
-        risk_free_rate_annual=RISK_FREE_RATE
-    )
+        total_trade_count = len(sorted_all_trades)
+        wins_count = len(winning_trades)
+        losses_count = len(losing_trades)
+        win_rate = (wins_count / total_trade_count * 100) if total_trade_count > 0 else 0.0
 
-    portfolio_max_dd_dollars, portfolio_max_dd_pct = calculate_max_drawdown(combined_equity)
-    portfolio_sharpe = calculate_sharpe_ratio(combined_equity, periods_per_year=get_periods_per_year(bar_resolution))
+        gross_profit = sum(t["pnl_dollars"] for t in winning_trades)
+        gross_loss = abs(sum(t["pnl_dollars"] for t in losing_trades))
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0.0)
 
-    winning_trades = [t for t in sorted_all_trades if t["pnl_dollars"] > 0]
-    losing_trades = [t for t in sorted_all_trades if t["pnl_dollars"] < 0]
+        print("\n" + "=" * 115)
+        print(f"                     REGIME PORTFOLIO SUMMARY: {regime_name.upper()}                                 ")
+        print("=" * 115)
+        print(f" Total Symbols Evaluated:     {len(all_results)} / {len(target_universe)}")
+        print(f" Aggregate Net P&L:           ${aggregate_pnl:+,.2f} ({aggregate_pnl_pct:+.2f}%)")
+        print(f" Benchmark Average Return:    {avg_buy_hold_pct:+.2f}%")
+        print("-" * 115)
+        if spy_metrics:
+            print(f" Broad Market Beta (β vs SPY): {spy_metrics['beta']:.2f}")
+            print(f" Jensen's Alpha (α vs SPY):    {spy_metrics['alpha_pct']:+.2f}%")
+            print(f" SPY Benchmark Return:        {spy_metrics['bench_return_pct']:+.2f}%")
+        else:
+            print(f" Broad Market Beta (β vs SPY): N/A (Insufficient daily benchmark alignment)")
+        print("-" * 115)
+        print(f" Total Trades Executed:       {total_trade_count}")
+        if total_trade_count < 100:
+            print(f" ⚠️ WARNING: Low sample size ({total_trade_count} trades). Sharpe may be statistically unreliable.")
+        print(f" Win Rate:                    {win_rate:.1f}% ({wins_count} W / {losses_count} L)")
+        print(f" Profit Factor:               {profit_factor:.2f} (Gross Profit: ${gross_profit:,.2f} / Gross Loss: ${gross_loss:,.2f})")
+        print(f" Max Portfolio Drawdown:      -${portfolio_max_dd_dollars:,.2f} (-{portfolio_max_dd_pct:.2f}%)")
+        print(f" Portfolio Sharpe Ratio:      {portfolio_sharpe:.2f}")
+        print("=" * 115 + "\n")
 
-    total_trade_count = len(sorted_all_trades)
-    wins_count = len(winning_trades)
-    losses_count = len(losing_trades)
-    win_rate = (wins_count / total_trade_count * 100) if total_trade_count > 0 else 0.0
-
-    gross_profit = sum(t["pnl_dollars"] for t in winning_trades)
-    gross_loss = abs(sum(t["pnl_dollars"] for t in losing_trades))
-    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0.0)
-
-    print("\n" + "=" * 115)
-    print(f"                                   PER-TICKER BREAKDOWN SUMMARY                                     ")
-    print("=" * 115)
-    print(f"{'Ticker':<8} | {'Trades':<6} | {'Net P&L ($)':<11} | {'Strategy %':<10} | {'B&H %':<8} | {'Beta (β)':<8} | {'Alpha %':<8} | {'Max DD %':<8}")
-    print("-" * 115)
-    for r in all_results:
-        print(f"{r['symbol']:<8} | {len(r['trades']):<6} | ${r['net_pnl']:>+9,.2f} | {r['net_pnl_pct']:>+9.2f}% | {r['buy_hold_pct']:>+7.2f}% | {r['beta']:>8.2f} | {r['alpha_pct']:>+7.2f}% | -{r['max_dd_pct']:>6.2f}%")
-    print("=" * 115)
-
-    print("\n" + "=" * 115)
-    print(f"                                 COMBINED PORTFOLIO PERFORMANCE                                     ")
-    print("=" * 115)
-    print(f" Total Symbols Evaluated:     {len(all_results)} / {len(ACTIVE_UNIVERSE)}")
-    print(f" Combined Starting Cash:      ${total_initial_capital:,.2f}")
-    print(f" Combined Ending Cash:        ${total_ending_capital:,.2f}")
-    print(f" Aggregate Net P&L:           ${aggregate_pnl:+,.2f} ({aggregate_pnl_pct:+.2f}%)")
-    print(f" Benchmark Average Return:    {avg_buy_hold_pct:+.2f}%")
-    print("-" * 115)
-    if spy_metrics:
-        print(f" Broad Market Beta (β vs SPY): {spy_metrics['beta']:.2f}")
-        print(f" Jensen's Alpha (α vs SPY):    {spy_metrics['alpha_pct']:+.2f}%")
-        print(f" SPY Benchmark Return:        {spy_metrics['bench_return_pct']:+.2f}%")
-    else:
-        print(f" Broad Market Beta (β vs SPY): N/A (Insufficient daily benchmark alignment)")
-    print("-" * 115)
-    print(f" Total Trades Executed:       {total_trade_count}")
-    print(f" Win Rate:                    {win_rate:.1f}% ({wins_count} W / {losses_count} L)")
-    print(f" Profit Factor:               {profit_factor:.2f} (Gross Profit: ${gross_profit:,.2f} / Gross Loss: ${gross_loss:,.2f})")
-    print(f" Max Portfolio Drawdown:      -${portfolio_max_dd_dollars:,.2f} (-{portfolio_max_dd_pct:.2f}%)")
-    print(f" Portfolio Sharpe Ratio:      {portfolio_sharpe:.2f}")
-    print("=" * 115 + "\n")
-
-    run_monte_carlo_simulation(
-        all_trades=sorted_all_trades,
-        starting_capital=total_initial_capital,
-        avg_buy_hold_pct=avg_buy_hold_pct,
-        spy_return_pct=spy_metrics["bench_return_pct"] if spy_metrics else None,
-        num_simulations=1000
-    )
+        run_monte_carlo_simulation(
+            all_trades=sorted_all_trades,
+            starting_capital=total_initial_capital,
+            avg_buy_hold_pct=avg_buy_hold_pct,
+            spy_return_pct=spy_metrics["bench_return_pct"] if spy_metrics else None,
+            num_simulations=1000
+        )
 
 if __name__ == "__main__":
     run_backtest()
