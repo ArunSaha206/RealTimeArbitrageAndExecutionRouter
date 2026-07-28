@@ -51,6 +51,26 @@ def get_webull_timespan(resolution_str):
         pass
     return Timespan.M1
 
+# Bars per year assumes ~250 US trading days/year, 6.5hr (390min) session.
+BARS_PER_YEAR_BY_RESOLUTION = {
+    "M1": 390 * 250,       # 97,500
+    "M5": 78 * 250,        # 19,500
+    "M15": 26 * 250,       # 6,500
+    "M30": 13 * 250,       # 3,250
+    "H1": 7 * 250,         # 1,750 (6.5hr session rounded up to 7 bars/day)
+    "D1": 250,             # 250
+}
+
+def get_periods_per_year(resolution_str, default=19500):
+    """
+    Maps a bar resolution string to the number of bars/year used to
+    annualize the Sharpe ratio. This MUST match whatever bar_resolution
+    the active strategy is actually trading on -- annualizing M5 returns
+    with an M1 scaling factor (or vice versa) silently produces a wrong
+    Sharpe ratio.
+    """
+    return BARS_PER_YEAR_BY_RESOLUTION.get(str(resolution_str).upper(), default)
+
 def parse_webull_time(time_value):
     """Converts Webull timestamp to UTC-aware datetime."""
     if isinstance(time_value, str):
@@ -166,7 +186,12 @@ def get_beta_and_alpha(strategy_daily_returns, benchmark_symbol="SPY", risk_free
     strat_period_return = (1 + aligned['strategy']).prod() - 1
     bench_period_return = (1 + aligned['benchmark']).prod() - 1
 
-    num_days = max((max_date - min_date).days, 1)
+    # Use the ACTUAL aligned date range (post-intersection/dropna), not the
+    # pre-alignment strategy-only range -- otherwise the risk-free rate gets
+    # compounded over a different window than the returns being compared.
+    aligned_min_date = aligned.index.min()
+    aligned_max_date = aligned.index.max()
+    num_days = max((aligned_max_date - aligned_min_date).days, 1)
     risk_free_period = (1 + risk_free_rate_annual) ** (num_days / 365.0) - 1
 
     expected_return = risk_free_period + beta * (bench_period_return - risk_free_period)
@@ -334,7 +359,8 @@ def backtest_single_symbol(symbol, data_client, timespan, strategy_config):
     stock_pnl_pct = ((end_stock_price - start_stock_price) / start_stock_price) * 100
 
     max_dd_dollars, max_dd_pct = calculate_max_drawdown(equity_curve)
-    sharpe = calculate_sharpe_ratio(equity_curve)
+    periods_per_year = get_periods_per_year(strategy_config["bar_resolution"])
+    sharpe = calculate_sharpe_ratio(equity_curve, periods_per_year=periods_per_year)
 
     single_equity_df = pd.DataFrame({"datetime": timestamps, "equity": equity_curve})
     single_equity_df['date'] = pd.to_datetime(single_equity_df['datetime']).dt.date
@@ -543,7 +569,7 @@ def run_backtest():
     )
 
     portfolio_max_dd_dollars, portfolio_max_dd_pct = calculate_max_drawdown(combined_equity)
-    portfolio_sharpe = calculate_sharpe_ratio(combined_equity)
+    portfolio_sharpe = calculate_sharpe_ratio(combined_equity, periods_per_year=get_periods_per_year(bar_resolution))
 
     winning_trades = [t for t in sorted_all_trades if t["pnl_dollars"] > 0]
     losing_trades = [t for t in sorted_all_trades if t["pnl_dollars"] < 0]

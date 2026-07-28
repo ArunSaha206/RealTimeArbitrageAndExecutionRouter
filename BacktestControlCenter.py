@@ -52,4 +52,4 @@ ETFS_ONLY = ["SPY", "QQQ", "IWM", "XLE", "XLF"]
 
 # --- ACTIVE BENCHMARK ---
 # Set ACTIVE_UNIVERSE to whichever list you want to run right now
-ACTIVE_UNIVERSE = NVDA
+ACTIVE_UNIVERSE = DEFAULT_UNIVERSE
