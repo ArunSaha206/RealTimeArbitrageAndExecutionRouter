@@ -188,7 +188,6 @@
 #                 df.to_parquet(cache_file)
                 
 #             except Exception as e:
-#                 # Silencing individual errors here so they don't break the progress bar visually
 #                 return []
 
 #         if df.index.tz is None:
@@ -233,8 +232,14 @@
 # if not os.path.exists(RESULTS_CACHE_DIR):
 #     os.makedirs(RESULTS_CACHE_DIR)
 
-# def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strategy_name):
-#     """Runs backtest logic on a single ticker for a specific historical window."""
+# def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strategy_name, regime_name):
+#     """Runs backtest logic on a single ticker for a specific historical window.
+
+#     regime_name is the REGIME_WINDOWS key this run belongs to (e.g.
+#     "covid_crash_2020"). It's stamped onto the result so downstream
+#     consumers (like Dashboard.py) never accidentally aggregate equity
+#     curves across non-overlapping date windows.
+#     """
     
 #     # Dynamically import strategy module inside background worker process
 #     strategy_module = importlib.import_module(strategy_name)
@@ -260,7 +265,7 @@
 #             with open(cache_filepath, 'rb') as f:
 #                 return pickle.load(f)
 #         except Exception:
-#             pass # If cache file is corrupted, ignore and recalculate
+#             pass
 #     # -----------------------------------------------------------------
 
 #     formatted_bars = fetch_deep_history(
@@ -351,7 +356,7 @@
 
 #             trades.append({
 #                 "symbol": symbol,
-#                 "strategy_used": strategy_module.__name__, # Log strategy for export data
+#                 "strategy_used": strategy_module.__name__,
 #                 "entry_time": entry_time,
 #                 "exit_time": current_dt,
 #                 "entry_price": entry_price,
@@ -411,6 +416,7 @@
 
 #     result_dict = {
 #         "symbol": symbol,
+#         "regime_name": regime_name,   # <-- tags this result with its REGIME_WINDOWS key
 #         "final_balance": final_balance,
 #         "net_pnl": total_net_pnl,
 #         "net_pnl_pct": total_net_pnl_pct,
@@ -426,13 +432,11 @@
 #         "bars_count": len(formatted_bars)
 #     }
     
-#     # -----------------------------------------------------------------
-#     # Save the successful result to the Smart Cache before returning
-#     # -----------------------------------------------------------------
+#     # Save the successful result to Smart Cache before returning
 #     try:
 #         with open(cache_filepath, 'wb') as f:
 #             pickle.dump(result_dict, f)
-#     except Exception as e:
+#     except Exception:
 #         pass 
         
 #     return result_dict
@@ -446,28 +450,19 @@
 #         print("⚠️ No trades available for Monte Carlo simulation.")
 #         return
 
-#     # Extract all PnLs into a fast numpy array
 #     trade_pnl_dollars = np.array([t["pnl_dollars"] for t in all_trades])
 #     num_trades = len(trade_pnl_dollars)
 
-#     # 1. Fully Vectorized Sampling (Generates 1000 equity curves instantly)
-#     # Shape: (num_simulations, num_trades)
 #     simulated_pnl = np.random.choice(trade_pnl_dollars, size=(num_simulations, num_trades), replace=True)
-    
-#     # Calculate equity curves for all simulations at once
 #     equity_curves = starting_capital + np.cumsum(simulated_pnl, axis=1)
     
-#     # 2. Extract final balances
 #     final_balances = equity_curves[:, -1]
-    
-#     # 3. Vectorized Drawdown Calculation
 #     running_max = np.maximum.accumulate(equity_curves, axis=1)
-#     running_max = np.maximum(starting_capital, running_max)  # Account for immediate dips
+#     running_max = np.maximum(starting_capital, running_max)
     
 #     drawdowns = (running_max - equity_curves) / running_max * 100
 #     max_drawdowns_pct = np.max(drawdowns, axis=1)
     
-#     # 4. Core Metrics
 #     hit_ruin = max_drawdowns_pct >= ruin_threshold_pct
 #     ruin_count = np.sum(hit_ruin)
     
@@ -477,7 +472,6 @@
 #     if spy_return_pct is not None:
 #         beat_spy_count = np.sum(sim_return_pct > spy_return_pct)
     
-#     # 5. Fast Streak Calculation
 #     is_loss = simulated_pnl < 0
 #     max_streaks = np.zeros(num_simulations, dtype=int)
 #     for i in range(num_simulations):
@@ -492,7 +486,6 @@
 #                 streak = 0
 #         max_streaks[i] = max_s
 
-#     # Final Percentiles
 #     pnl_array = final_balances - starting_capital
 #     prob_profitable = (np.sum(pnl_array > 0) / num_simulations) * 100
 #     prob_beat_bh = (beat_bh_count / num_simulations) * 100
@@ -538,7 +531,6 @@
 
 # def run_backtest():
     
-#     # Handle strategy list vs single strategy for backward compatibility
 #     strategies_to_test = getattr(control, "ACTIVE_STRATEGIES", [])
 #     if not strategies_to_test:
 #         if hasattr(control, "ACTIVE_STRATEGY"):
@@ -576,10 +568,7 @@
 #             }
 #         }
 
-#     # Store the ultimate results for all strategies here
 #     multi_strategy_results = []
-    
-#     # Store EVERY trade from EVERY strategy for final CSV export
 #     master_trade_log = []
 
 #     # =====================================================================
@@ -594,7 +583,6 @@
 #         print(f" 🚀 NOW RUNNING STRATEGY: {current_strategy.__name__} | Res={bar_resolution} | Lookback={strategy_config['lookback']} | Sizing={strategy_config['position_mode']} ".center(175))
 #         print("█" * 175 + "\n")
 
-#         # --- GLOBAL AGGREGATORS FOR FINAL SUMMARY (Reset per strategy) ---
 #         global_summary = {
 #             "total_symbols_evaluated": 0,
 #             "total_initial_capital": 0.0,
@@ -610,10 +598,8 @@
 #             "regime_summaries": [] 
 #         }
         
-#         # Store tasks to run all individual MCs rapidly at the end of the script
 #         mc_tasks = []
 
-#         # Execute simulation strictly isolated by regime window
 #         for regime_name, config in regimes.items():
 #             print("=" * 115)
 #             print(f" 📅 EXECUTING REGIME: {regime_name.upper()} ({config['start']} to {config['end']})")
@@ -628,24 +614,20 @@
 #                 print(f"⚠️ No symbols found for '{control.ACTIVE_ASSET_TYPE}' in regime '{regime_name}'. Skipping.\n")
 #                 continue
 
-#             # -----------------------------------------------------------------
-#             # MULTIPROCESSING: Backtest all tickers in this regime in parallel
-#             # -----------------------------------------------------------------
 #             futures = []
 #             with concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
 #                 for symbol in target_universe:
-#                     # Submit ticker + strategy module NAME (string) to avoid pickle error
 #                     future = executor.submit(
 #                         backtest_single_symbol, 
 #                         symbol, 
 #                         config['start'], 
 #                         config['end'], 
 #                         strategy_config, 
-#                         current_strategy.__name__
+#                         current_strategy.__name__,
+#                         regime_name          # <-- tags this run with its regime for the dashboard
 #                     )
 #                     futures.append(future)
                 
-#                 # Wrap futures in a tqdm progress bar
 #                 for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"Analyzing {len(target_universe)} Tickers"):
 #                     res = future.result()
 #                     if res:
@@ -656,7 +638,6 @@
 #                 print(f"❌ No valid ticker data evaluated for {regime_name.upper()}. Moving to next regime.\n")
 #                 continue
             
-#             # Save trades to global export log
 #             master_trade_log.extend(all_trades)
 
 #             # =====================================================================
@@ -673,13 +654,12 @@
 #             else:
 #                 gross_pnl_pct = 0.0
 
-#             # Mark-to-Market Tax Application for the Regime
 #             if enable_taxes:
 #                 if gross_pnl > 0:
-#                     tax_impact = -(gross_pnl * tax_rate) # Tax Paid
+#                     tax_impact = -(gross_pnl * tax_rate)
 #                     tax_label = "Tax Owed (Federal Ordinary Income)"
 #                 else:
-#                     tax_impact = abs(gross_pnl) * tax_rate # Tax Credit (Write-off)
+#                     tax_impact = abs(gross_pnl) * tax_rate
 #                     tax_label = "Tax Credit (Business Loss Write-off)"
 #             else:
 #                 tax_impact = 0.0
@@ -695,9 +675,6 @@
 
 #             avg_buy_hold_pct = sum(r["buy_hold_pct"] for r in all_results) / len(all_results)
             
-#             # ---------------------------------------------------------------------
-#             # Robust Time-Series Alignment (Fixes the "Rivian Bug")
-#             # ---------------------------------------------------------------------
 #             daily_equity_series = []
 #             for r in all_results:
 #                 temp_df = pd.DataFrame({
@@ -705,17 +682,12 @@
 #                     "equity": r["equity_curve"]
 #                 })
 #                 temp_df['date'] = pd.to_datetime(temp_df['datetime']).dt.date
-                
-#                 # Get the closing equity for this ticker on each day
 #                 daily_close_eq = temp_df.groupby('date')['equity'].last()
 #                 daily_equity_series.append(daily_close_eq)
 
-#             # Concat merges them by exact date. 
-#             # ffill() carries forward halted days, fillna() handles pre-IPO days as flat cash
 #             portfolio_daily_df = pd.concat(daily_equity_series, axis=1)
 #             portfolio_daily_df = portfolio_daily_df.ffill().fillna(control.STARTING_CASH_PER_TICKER)
             
-#             # Sum across all tickers to get the true daily portfolio equity curve
 #             daily_portfolio_equity = portfolio_daily_df.sum(axis=1)
 #             portfolio_daily_returns = daily_portfolio_equity.pct_change().dropna()
 
@@ -725,10 +697,8 @@
 #                 risk_free_rate_annual=control.RISK_FREE_RATE
 #             )
 
-#             # Calculate Drawdown and Sharpe on the DAILY portfolio equity
 #             portfolio_max_dd_dollars, portfolio_max_dd_pct = calculate_max_drawdown(daily_portfolio_equity.values)
 #             portfolio_sharpe = calculate_sharpe_ratio(daily_portfolio_equity.values, periods_per_year=250)
-#             # ---------------------------------------------------------------------
 
 #             winning_trades = [t for t in sorted_all_trades if t["pnl_dollars"] > 0]
 #             losing_trades = [t for t in sorted_all_trades if t["pnl_dollars"] < 0]
@@ -752,7 +722,6 @@
 #             else:
 #                 profit_factor = 0.0
 
-#             # --- UPDATE GLOBAL METRICS ---
 #             global_summary["total_symbols_evaluated"] += len(all_results)
 #             global_summary["total_initial_capital"] += total_initial_capital
 #             global_summary["total_ending_capital_pre_tax"] += total_ending_capital_pre_tax
@@ -765,7 +734,6 @@
 #             global_summary["total_gross_loss"] += gross_loss
 #             global_summary["bh_returns"].append(avg_buy_hold_pct)
 
-#             # Store individual regime stats for the master recap table (Including Beta and Alpha)
 #             global_summary["regime_summaries"].append({
 #                 "name": regime_name.upper(),
 #                 "pre_tax_pnl": gross_pnl,
@@ -783,7 +751,6 @@
 #                 "alpha": spy_metrics['alpha_pct'] if spy_metrics else None
 #             })
 
-#             # Queue this regime's trades for the end-of-script deferred Monte Carlo calculation
 #             if total_trade_count > 0:
 #                 mc_tasks.append({
 #                     "title": f"MC STRESS TEST: {regime_name.upper()} ({current_strategy.__name__})",
@@ -862,7 +829,6 @@
 #             print(f"{'🌟 MULTI-REGIME SUMMARY FOR: ' + current_strategy.__name__ + ' (PRE-TAX VS. POST-TAX) 🌟':^175}")
 #             print("★" * 175)
 
-#             # --- INDIVIDUAL REGIME RECAP TABLE ---
 #             print(f"{'REGIME':<18} | {'PRE-TAX P&L ($)':>15} | {'PRE-TAX (%)':>11} | {'TAX IMPACT ($)':>14} | {'POST-TAX P&L ($)':>16} | {'POST-TAX (%)':>12} | {'B&H (%)':>8} | {'TRADES':>6} | {'WIN %':>6} | {'PF':>5} | {'SHARPE':>6} | {'MAX DD':>8} | {'BETA':>5} | {'ALPHA (%)':>9}")
 #             print("-" * 175)
 #             for rs in global_summary["regime_summaries"]:
@@ -887,7 +853,6 @@
 #                 print(f"{r_name:<18} | ${rs['pre_tax_pnl']:>14,.2f} | {rs['pre_tax_pnl_pct']:>10.2f}% | {tax_str:>14} | ${rs['post_tax_pnl']:>15,.2f} | {rs['post_tax_pnl_pct']:>11.2f}% | {rs['bh_pct']:>7.2f}% | {rs['trades']:>6} | {rs['win_rate']:>5.1f}% | {rs['pf']:>4.2f} | {rs['sharpe']:>6.2f} | -{rs['max_dd_pct']:>6.2f}% | {beta_str} | {alpha_str}")
 #             print("-" * 175)
 
-#             # --- GLOBAL AGGREGATES ---
 #             print(f" Total Regimes Tested:        {len(regimes)}")
 #             print(f" Total Symbols Evaluated:     {global_summary['total_symbols_evaluated']}")
 #             print(f" Total Cumulative Capital:    ${global_summary['total_initial_capital']:,.2f}")
@@ -906,9 +871,6 @@
 #             print(f" Global Profit Factor:        {global_pf:.2f}")
 #             print("★" * 175 + "\n")
 
-#             # =====================================================================
-#             # DEFERRED MONTE CARLO FOR INDIVIDUAL REGIMES
-#             # =====================================================================
 #             if mc_tasks:
 #                 print(f"🎲 Running Vectorized Monte Carlo Simulations for {len(mc_tasks)} Regimes on {current_strategy.__name__}...")
 #                 for task in mc_tasks:
@@ -921,32 +883,38 @@
 #                         title=task["title"]
 #                     )
         
-#         # Save global summary to multi-strategy comparison list
 #         multi_strategy_results.append({
 #             "name": current_strategy.__name__,
 #             "global_summary": global_summary
 #         })
 
 #     # =====================================================================
-#     # 💥 ULTIMATE STRATEGY COMPARISON MATRIX 💥
+#     # 💥 ULTIMATE STRATEGY COMPARISON MATRIX (WITH DYNAMIC REGIME WIN %) 💥
 #     # =====================================================================
 #     export_summary_rows = []
 
 #     if len(multi_strategy_results) > 1:
-#         print("\n" + "🏆" * 87)
-#         print(f"{'ULTIMATE STRATEGY COMPARISON MATRIX':^175}")
-#         print("🏆" * 87)
-#         print(f"{'STRATEGY':<20} | {'PRE-TAX P&L ($)':>15} | {'PRE-TAX (%)':>11} | {'POST-TAX P&L ($)':>16} | {'POST-TAX (%)':>12} | {'WIN %':>6} | {'PF':>5} | {'AVG SHARPE':>10} | {'AVG MAX DD':>10} | {'AVG BETA':>8}")
-#         print("-" * 175)
+#         all_regime_names = []
+#         for res in multi_strategy_results:
+#             for rs in res["global_summary"]["regime_summaries"]:
+#                 if rs["name"] not in all_regime_names:
+#                     all_regime_names.append(rs["name"])
+
+#         regime_headers_str = " | ".join([f"{(r[:10] + ' W%'):>14}" for r in all_regime_names])
+
+#         print("\n" + "🏆" * 95)
+#         print(f"{'ULTIMATE STRATEGY COMPARISON MATRIX':^190}")
+#         print("🏆" * 95)
+#         print(f"{'STRATEGY':<18} | {'PRE-TAX ($)':>12} | {'PRE-TAX (%)':>11} | {'POST-TAX ($)':>13} | {'POST-TAX (%)':>12} | {'OVERALL W%':>10} | {regime_headers_str} | {'PF':>5} | {'AVG SHARPE':>10} | {'AVG MAX DD':>10} | {'AVG BETA':>8}")
+#         print("-" * 190)
 
 #         for res in multi_strategy_results:
-#             name = res["name"][:20]
+#             name = res["name"][:18]
 #             g_sum = res["global_summary"]
             
 #             if g_sum["total_symbols_evaluated"] == 0:
 #                 continue
                 
-#             # Calculate Averages across all tested regimes for comparison
 #             if g_sum["regime_summaries"]:
 #                 avg_sharpe = np.mean([r["sharpe"] for r in g_sum["regime_summaries"]])
 #                 avg_dd = np.mean([r["max_dd_pct"] for r in g_sum["regime_summaries"]])
@@ -956,34 +924,50 @@
 #             else:
 #                 avg_sharpe, avg_dd, avg_beta = 0.0, 0.0, 0.0
             
-#             # Global Totals
 #             g_pnl_pre = g_sum["total_ending_capital_pre_tax"] - g_sum["total_initial_capital"]
 #             g_pnl_post = g_sum["total_ending_capital_post_tax"] - g_sum["total_initial_capital"]
             
 #             g_pnl_pct_pre = (g_pnl_pre / g_sum["total_initial_capital"]) * 100 if g_sum["total_initial_capital"] > 0 else 0.0
 #             g_pnl_pct_post = (g_pnl_post / g_sum["total_initial_capital"]) * 100 if g_sum["total_initial_capital"] > 0 else 0.0
             
-#             win_rate = (g_sum["total_wins"] / g_sum["total_trades"] * 100) if g_sum["total_trades"] > 0 else 0.0
+#             overall_win_rate = (g_sum["total_wins"] / g_sum["total_trades"] * 100) if g_sum["total_trades"] > 0 else 0.0
 #             pf = (g_sum["total_gross_profit"] / g_sum["total_gross_loss"]) if g_sum["total_gross_loss"] > 0 else 0.0
             
-#             print(f"{name:<20} | ${g_pnl_pre:>14,.2f} | {g_pnl_pct_pre:>10.2f}% | ${g_pnl_post:>15,.2f} | {g_pnl_pct_post:>11.2f}% | {win_rate:>5.1f}% | {pf:>4.2f} | {avg_sharpe:>10.2f} | -{avg_dd:>9.2f}% | {avg_beta:>8.2f}")
+#             regime_win_map = {rs["name"]: rs["win_rate"] for rs in g_sum["regime_summaries"]}
             
-#             # Append data row for export
-#             export_summary_rows.append({
+#             regime_win_cells = []
+#             row_export_dict = {
 #                 "Strategy": res["name"],
 #                 "Pre-Tax PnL ($)": round(g_pnl_pre, 2),
 #                 "Pre-Tax PnL (%)": round(g_pnl_pct_pre, 2),
 #                 "Post-Tax PnL ($)": round(g_pnl_post, 2),
 #                 "Post-Tax PnL (%)": round(g_pnl_pct_post, 2),
-#                 "Win Rate (%)": round(win_rate, 2),
+#                 "Overall Win Rate (%)": round(overall_win_rate, 2),
+#             }
+
+#             for r_name in all_regime_names:
+#                 if r_name in regime_win_map:
+#                     w_val = regime_win_map[r_name]
+#                     regime_win_cells.append(f"{w_val:>13.1f}%")
+#                     row_export_dict[f"{r_name} Win %"] = round(w_val, 2)
+#                 else:
+#                     regime_win_cells.append("          N/A ")
+#                     row_export_dict[f"{r_name} Win %"] = "N/A"
+
+#             row_export_dict.update({
 #                 "Profit Factor": round(pf, 2),
 #                 "Avg Sharpe": round(avg_sharpe, 2),
 #                 "Avg Max Drawdown (%)": round(avg_dd, 2),
 #                 "Avg Beta": round(avg_beta, 2),
 #                 "Total Trades Executed": g_sum["total_trades"]
 #             })
+#             export_summary_rows.append(row_export_dict)
+
+#             regime_win_row_str = " | ".join(regime_win_cells)
+
+#             print(f"{name:<18} | ${g_pnl_pre:>11,.2f} | {g_pnl_pct_pre:>10.2f}% | ${g_pnl_post:>12,.2f} | {g_pnl_pct_post:>11.2f}% | {overall_win_rate:>9.1f}% | {regime_win_row_str} | {pf:>4.2f} | {avg_sharpe:>10.2f} | -{avg_dd:>9.2f}% | {avg_beta:>8.2f}")
             
-#         print("-" * 175 + "\n")
+#         print("-" * 190 + "\n")
 
 #     # =====================================================================
 #     # 💾 DATA EXPORT LOGIC
@@ -994,17 +978,14 @@
 #         out_dir = f"backtest_results_{timestamp}"
 #         os.makedirs(out_dir, exist_ok=True)
 
-#         # Export Master Strategy Comparison (if multiple strategies)
 #         if len(multi_strategy_results) > 1 and export_summary_rows:
 #             summary_df = pd.DataFrame(export_summary_rows)
 #             summary_path = os.path.join(out_dir, "strategy_comparison.csv")
 #             summary_df.to_csv(summary_path, index=False)
 
-#         # Export Raw Trade Data
 #         trades_df = pd.DataFrame(master_trade_log)
 #         trades_path = os.path.join(out_dir, "all_trades_log.csv")
         
-#         # Clean up timezone objects in dates before exporting to CSV
 #         for col in ['entry_time', 'exit_time']:
 #             if col in trades_df.columns:
 #                 trades_df[col] = trades_df[col].apply(lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if isinstance(x, datetime) else x)
@@ -1015,6 +996,25 @@
 
 # if __name__ == "__main__":
 #     run_backtest()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1073,7 +1073,6 @@ load_dotenv()
 # 1. HELPER & METRIC FUNCTIONS
 # =====================================================================
 
-# Bars per year assumes ~250 US trading days/year, 6.5hr (390min) session.
 BARS_PER_YEAR_BY_RESOLUTION = {
     "M1": 390 * 250,       
     "M5": 78 * 250,        
@@ -1202,10 +1201,6 @@ if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 
 def fetch_deep_history(symbol, resolution, start_date_str, end_date_str, provider="DATABENTO"):
-    """
-    Fetches historical OHLCV data, caches it locally to prevent duplicate API charges, 
-    and resamples it to the strategy's required timeframe.
-    """
     formatted_bars = []
     
     if provider == "DATABENTO":
@@ -1281,15 +1276,17 @@ RESULTS_CACHE_DIR = "results_cache"
 if not os.path.exists(RESULTS_CACHE_DIR):
     os.makedirs(RESULTS_CACHE_DIR)
 
-def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strategy_name):
-    """Runs backtest logic on a single ticker for a specific historical window."""
+def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strategy_name, regime_name):
+    """Runs backtest logic on a single ticker for a specific historical window.
+
+    regime_name is the REGIME_WINDOWS key this run belongs to (e.g.
+    "covid_crash_2020"). It's stamped onto the result so downstream
+    consumers (like Dashboard.py) never accidentally aggregate equity
+    curves across non-overlapping date windows.
+    """
     
-    # Dynamically import strategy module inside background worker process
     strategy_module = importlib.import_module(strategy_name)
 
-    # -----------------------------------------------------------------
-    # SMART CACHE: Build a unique hash for this specific backtest run
-    # -----------------------------------------------------------------
     try:
         source_code = inspect.getsource(strategy_module)
     except Exception:
@@ -1298,18 +1295,15 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
     config_str = json.dumps(strategy_config, sort_keys=True)
     unique_run_string = f"{symbol}_{start_date}_{end_date}_{strategy_name}_{config_str}_{source_code}_{control.STARTING_CASH_PER_TICKER}"
     
-    # Generate SHA-256 Hash
     cache_hash = hashlib.sha256(unique_run_string.encode('utf-8')).hexdigest()
     cache_filepath = os.path.join(RESULTS_CACHE_DIR, f"{cache_hash}.pkl")
 
-    # If this exact configuration has been run before, load it instantly!
     if os.path.exists(cache_filepath):
         try:
             with open(cache_filepath, 'rb') as f:
                 return pickle.load(f)
         except Exception:
             pass
-    # -----------------------------------------------------------------
 
     formatted_bars = fetch_deep_history(
         symbol=symbol,
@@ -1341,7 +1335,6 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
     rolling_buffer = formatted_bars[:lookback_window]
     simulation_bars = formatted_bars[lookback_window:]
 
-    # Check if the strategy expects an entry_price parameter (backward compatibility)
     analyze_sig = inspect.signature(strategy_module.analyze)
     has_entry_price = 'entry_price' in analyze_sig.parameters
 
@@ -1372,7 +1365,6 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
 
         signal = signal_result.get("signal", "HOLD")
 
-        # --- EXECUTE BUY SIGNAL ---
         if signal == "BUY" and position_qty == 0:
             mode = str(strategy_config["position_mode"]).upper().replace("_", "").strip()
             if mode == "ALLIN":
@@ -1388,7 +1380,6 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
                 entry_time = current_dt
                 entry_bar_index = idx
 
-        # --- EXECUTE SELL SIGNAL ---
         elif signal == "SELL" and position_qty > 0:
             sale_revenue = position_qty * current_price
             cash += sale_revenue
@@ -1413,7 +1404,6 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
             position_qty = 0
             entry_price = 0.0
 
-    # Close open position at simulation end
     if position_qty > 0:
         final_price = simulation_bars[-1]['close']
         final_dt = simulation_bars[-1]['datetime']
@@ -1459,6 +1449,7 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
 
     result_dict = {
         "symbol": symbol,
+        "regime_name": regime_name,
         "final_balance": final_balance,
         "net_pnl": total_net_pnl,
         "net_pnl_pct": total_net_pnl_pct,
@@ -1474,7 +1465,6 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
         "bars_count": len(formatted_bars)
     }
     
-    # Save the successful result to Smart Cache before returning
     try:
         with open(cache_filepath, 'wb') as f:
             pickle.dump(result_dict, f)
@@ -1488,9 +1478,14 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
 # =====================================================================
 
 def run_monte_carlo_simulation(all_trades, starting_capital, avg_buy_hold_pct=0.0, spy_return_pct=None, num_simulations=1000, ruin_threshold_pct=20.0, title="ADVANCED MONTE CARLO STRESS TEST"):
+    """
+    Runs the vectorized Monte Carlo stress test AND returns its computed
+    stats as a dict, so callers (like the dashboard report) can persist
+    the results instead of them only living in the terminal print-out.
+    """
     if not all_trades:
         print("⚠️ No trades available for Monte Carlo simulation.")
-        return
+        return None
 
     trade_pnl_dollars = np.array([t["pnl_dollars"] for t in all_trades])
     num_trades = len(trade_pnl_dollars)
@@ -1511,8 +1506,7 @@ def run_monte_carlo_simulation(all_trades, starting_capital, avg_buy_hold_pct=0.
     sim_return_pct = ((final_balances - starting_capital) / starting_capital) * 100
     
     beat_bh_count = np.sum(sim_return_pct > avg_buy_hold_pct)
-    if spy_return_pct is not None:
-        beat_spy_count = np.sum(sim_return_pct > spy_return_pct)
+    beat_spy_count = np.sum(sim_return_pct > spy_return_pct) if spy_return_pct is not None else None
     
     is_loss = simulated_pnl < 0
     max_streaks = np.zeros(num_simulations, dtype=int)
@@ -1531,7 +1525,7 @@ def run_monte_carlo_simulation(all_trades, starting_capital, avg_buy_hold_pct=0.
     pnl_array = final_balances - starting_capital
     prob_profitable = (np.sum(pnl_array > 0) / num_simulations) * 100
     prob_beat_bh = (beat_bh_count / num_simulations) * 100
-    prob_beat_spy = (beat_spy_count / num_simulations) * 100 if spy_return_pct is not None else None
+    prob_beat_spy = (beat_spy_count / num_simulations) * 100 if beat_spy_count is not None else None
     risk_of_ruin = (ruin_count / num_simulations) * 100
 
     p5_final = np.percentile(final_balances, 5)
@@ -1566,6 +1560,25 @@ def run_monte_carlo_simulation(all_trades, starting_capital, avg_buy_hold_pct=0.
     print(f"    • Median Drawdown vs. 95% Worst Case:   -{p50_dd:.2f}%  |  95th %ile: -{p95_dd:.2f}%")
     print(f"    • Median Loss Streak vs. 95% Worst Case: {p50_streak} losses in a row  |  95th %ile: {p95_streak} in a row")
     print("=" * 115 + "\n")
+
+    return {
+        "title": title,
+        "num_simulations": num_simulations,
+        "prob_profitable": float(prob_profitable),
+        "prob_beat_bh": float(prob_beat_bh),
+        "avg_buy_hold_pct": float(avg_buy_hold_pct),
+        "prob_beat_spy": float(prob_beat_spy) if prob_beat_spy is not None else None,
+        "spy_return_pct": float(spy_return_pct) if spy_return_pct is not None else None,
+        "risk_of_ruin": float(risk_of_ruin),
+        "ruin_threshold_pct": float(ruin_threshold_pct),
+        "starting_capital": float(starting_capital),
+        "percentiles": {
+            "p5": float(p5_final), "p25": float(p25_final), "p50": float(p50_final),
+            "p75": float(p75_final), "p95": float(p95_final),
+        },
+        "drawdown_percentiles": {"p50": float(p50_dd), "p95": float(p95_dd)},
+        "streak_percentiles": {"p50": p50_streak, "p95": p95_streak},
+    }
 
 # =====================================================================
 # 5. MULTI-TICKER RUNNER & REGIME AGGREGATOR
@@ -1665,7 +1678,8 @@ def run_backtest():
                         config['start'], 
                         config['end'], 
                         strategy_config, 
-                        current_strategy.__name__
+                        current_strategy.__name__,
+                        regime_name
                     )
                     futures.append(future)
                 
@@ -1789,12 +1803,14 @@ def run_backtest():
                 "sharpe": portfolio_sharpe,
                 "max_dd_pct": portfolio_max_dd_pct,
                 "beta": spy_metrics['beta'] if spy_metrics else None,
-                "alpha": spy_metrics['alpha_pct'] if spy_metrics else None
+                "alpha": spy_metrics['alpha_pct'] if spy_metrics else None,
+                "monte_carlo": None,  # filled in below once MC has run
             })
 
             if total_trade_count > 0:
                 mc_tasks.append({
                     "title": f"MC STRESS TEST: {regime_name.upper()} ({current_strategy.__name__})",
+                    "regime_name": regime_name,
                     "all_trades": sorted_all_trades,
                     "starting_capital": total_initial_capital,
                     "avg_buy_hold_pct": avg_buy_hold_pct,
@@ -1915,7 +1931,7 @@ def run_backtest():
             if mc_tasks:
                 print(f"🎲 Running Vectorized Monte Carlo Simulations for {len(mc_tasks)} Regimes on {current_strategy.__name__}...")
                 for task in mc_tasks:
-                    run_monte_carlo_simulation(
+                    mc_result = run_monte_carlo_simulation(
                         all_trades=task["all_trades"],
                         starting_capital=task["starting_capital"],
                         avg_buy_hold_pct=task["avg_buy_hold_pct"],
@@ -1923,6 +1939,12 @@ def run_backtest():
                         num_simulations=1000,
                         title=task["title"]
                     )
+                    # Attach the MC result back onto its matching regime summary
+                    # so the full report has it alongside the rest of that regime's stats.
+                    for rs in global_summary["regime_summaries"]:
+                        if rs["name"] == task["regime_name"].upper():
+                            rs["monte_carlo"] = mc_result
+                            break
         
         multi_strategy_results.append({
             "name": current_strategy.__name__,
@@ -1935,14 +1957,12 @@ def run_backtest():
     export_summary_rows = []
 
     if len(multi_strategy_results) > 1:
-        # Collect all unique regime names in order of execution
         all_regime_names = []
         for res in multi_strategy_results:
             for rs in res["global_summary"]["regime_summaries"]:
                 if rs["name"] not in all_regime_names:
                     all_regime_names.append(rs["name"])
 
-        # Dynamically construct regime Win% headers for terminal display
         regime_headers_str = " | ".join([f"{(r[:10] + ' W%'):>14}" for r in all_regime_names])
 
         print("\n" + "🏆" * 95)
@@ -1976,7 +1996,6 @@ def run_backtest():
             overall_win_rate = (g_sum["total_wins"] / g_sum["total_trades"] * 100) if g_sum["total_trades"] > 0 else 0.0
             pf = (g_sum["total_gross_profit"] / g_sum["total_gross_loss"]) if g_sum["total_gross_loss"] > 0 else 0.0
             
-            # Map out each individual regime's Win% for this strategy
             regime_win_map = {rs["name"]: rs["win_rate"] for rs in g_sum["regime_summaries"]}
             
             regime_win_cells = []
@@ -2012,6 +2031,30 @@ def run_backtest():
             print(f"{name:<18} | ${g_pnl_pre:>11,.2f} | {g_pnl_pct_pre:>10.2f}% | ${g_pnl_post:>12,.2f} | {g_pnl_pct_post:>11.2f}% | {overall_win_rate:>9.1f}% | {regime_win_row_str} | {pf:>4.2f} | {avg_sharpe:>10.2f} | -{avg_dd:>9.2f}% | {avg_beta:>8.2f}")
             
         print("-" * 190 + "\n")
+
+    # =====================================================================
+    # 📝 SAVE CONSOLIDATED REPORT FOR THE DASHBOARD
+    # =====================================================================
+    # Unlike results_cache/<hash>.pkl (per-symbol, content-addressed, never
+    # overwritten), this is a "latest run" report at a fixed path — it's
+    # meant to always reflect the most recent full run, so Dashboard.py can
+    # show the regime tables, tax breakdown, and Monte Carlo stress tests
+    # that previously only existed as terminal print() output.
+    report = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "enable_taxes": enable_taxes,
+        "tax_rate": tax_rate,
+        "starting_cash_per_ticker": control.STARTING_CASH_PER_TICKER,
+        "strategies": multi_strategy_results,
+        "comparison_matrix": export_summary_rows,
+    }
+    report_path = os.path.join(RESULTS_CACHE_DIR, "summary_report.pkl")
+    try:
+        with open(report_path, "wb") as f:
+            pickle.dump(report, f)
+        print(f"📝 Full report saved for dashboard access: {report_path}")
+    except Exception as e:
+        print(f"⚠️ Failed to save summary report: {e}")
 
     # =====================================================================
     # 💾 DATA EXPORT LOGIC
