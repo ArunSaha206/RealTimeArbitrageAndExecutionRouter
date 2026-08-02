@@ -31,7 +31,7 @@ ORDINARY_INCOME_TAX_RATE = 0.24   # 24% Federal
 # =====================================================================
 # 5. REGIME & UNIVERSE MAPPING
 # =====================================================================
-ACTIVE_ASSET_TYPE = "STOCKS"  # Toggle this between "STOCKS" or "ETFS"
+ACTIVE_ASSET_TYPE = "ETFS"  # Toggle this between "STOCKS" or "ETFS"
 
 REGIME_WINDOWS = {
     "covid_crash_2020": {
