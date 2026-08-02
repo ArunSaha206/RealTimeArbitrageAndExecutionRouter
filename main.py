@@ -9,7 +9,7 @@ from webull.data.common.category import Category
 from webull.data.common.timespan import Timespan
 
 # Import strategies
-import M5breakout
+import strategies.M5breakout as M5breakout
 
 # Active strategy selection & configuration
 ACTIVE_STRATEGY = M5breakout.analyze

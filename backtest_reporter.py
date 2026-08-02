@@ -192,7 +192,7 @@ def save_and_export_data(enable_taxes, tax_rate, starting_cash, multi_strategy_r
     if master_trade_log:
         print(f"💾 EXPORTING DATA TO CSV...")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = f"backtest_results_{timestamp}"
+        out_dir = os.path.join("archive", f"backtest_results_{timestamp}")
         os.makedirs(out_dir, exist_ok=True)
 
         if len(multi_strategy_results) > 1 and export_summary_rows:

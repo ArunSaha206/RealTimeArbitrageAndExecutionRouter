@@ -1,8 +1,8 @@
-import M5breakout
-import M5support
-import M5supportsafe
-import M5supportsafesafe
-import M5supportsafesafesafe
+import strategies.M5breakout as M5breakout
+import strategies.M5support as M5support
+import strategies.M5supportsafe as M5supportsafe
+import strategies.M5supportsafesafe as M5supportsafesafe
+import strategies.M5supportsafesafesafe as M5supportsafesafesafe
 
 
 # =====================================================================
@@ -31,7 +31,7 @@ ORDINARY_INCOME_TAX_RATE = 0.24   # 24% Federal
 # =====================================================================
 # 5. REGIME & UNIVERSE MAPPING
 # =====================================================================
-ACTIVE_ASSET_TYPE = "STOCKS"  # Toggle this between "STOCKS" or "ETFS"
+ACTIVE_ASSET_TYPE = "ETFS"  # Toggle this between "STOCKS" or "ETFS"
 
 REGIME_WINDOWS = {
     "covid_crash_2020": {
