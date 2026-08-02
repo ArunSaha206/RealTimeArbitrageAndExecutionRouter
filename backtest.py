@@ -20,7 +20,8 @@ import backtest_control_center as control
 import metrics
 import data_engine
 import monte_carlo
-import backtest_reporter
+import backtest_reporter as reporter
+import portfolio  # <--- NEW: Import the centralized portfolio logic
 
 # Load API environment variables
 load_dotenv()
@@ -42,14 +43,7 @@ def get_periods_per_year(resolution_str, default=19500):
     return BARS_PER_YEAR_BY_RESOLUTION.get(str(resolution_str).upper(), default)
 
 # =====================================================================
-# 2. DEEP HISTORY DATA FETCHER (DATABENTO)
-# =====================================================================
-
-# Restructured
-
-
-# =====================================================================
-# 3. SINGLE-TICKER BACKTEST ENGINE (WITH SMART CACHING)
+# 2. SINGLE-TICKER BACKTEST ENGINE (WITH SMART CACHING)
 # =====================================================================
 
 RESULTS_CACHE_DIR = "results_cache"
@@ -57,13 +51,7 @@ if not os.path.exists(RESULTS_CACHE_DIR):
     os.makedirs(RESULTS_CACHE_DIR)
 
 def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strategy_name, regime_name):
-    """Runs backtest logic on a single ticker for a specific historical window.
-
-    regime_name is the REGIME_WINDOWS key this run belongs to (e.g.
-    "covid_crash_2020"). It's stamped onto the result so downstream
-    consumers (like Dashboard.py) never accidentally aggregate equity
-    curves across non-overlapping date windows.
-    """
+    """Runs backtest logic on a single ticker for a specific historical window."""
     
     strategy_module = importlib.import_module(strategy_name)
 
@@ -102,13 +90,11 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
     if len(formatted_bars) <= lookback_window:
         return None
 
-    cash = control.STARTING_CASH_PER_TICKER
-    position_qty = 0
-    entry_price = 0.0
-    entry_time = None
-    entry_bar_index = 0
-
-    trades = []
+    # =================================================================
+    # NEW: Initialize the centralized Portfolio object
+    # =================================================================
+    port = portfolio.Portfolio(control.STARTING_CASH_PER_TICKER)
+    
     equity_curve = []
     timestamps = []
 
@@ -123,8 +109,13 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
         current_dt = bar['datetime']
         rolling_buffer.append(bar)
 
-        portfolio_value = cash + (position_qty * current_price)
-        equity_curve.append(portfolio_value)
+        # Get current state from portfolio
+        pos = port.get_position(symbol)
+        position_qty = pos['qty']
+        entry_price = pos['entry_price']
+
+        # Log total equity
+        equity_curve.append(port.get_equity(symbol, current_price))
         timestamps.append(current_dt)
 
         if has_entry_price:
@@ -147,65 +138,26 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
 
         if signal == "BUY" and position_qty == 0:
             mode = str(strategy_config["position_mode"]).upper().replace("_", "").strip()
-            if mode == "ALLIN":
-                shares_to_buy = int(cash // current_price) if current_price > 0 else 0
-            else:
-                shares_to_buy = strategy_config["fixed_share_qty"]
-
-            if shares_to_buy > 0 and (shares_to_buy * current_price) <= cash:
-                position_qty = shares_to_buy
-                cost = position_qty * current_price
-                cash -= cost
-                entry_price = current_price
-                entry_time = current_dt
-                entry_bar_index = idx
+            fixed_qty = strategy_config.get("fixed_share_qty", 0)
+            
+            # Delegate buy math to the class
+            port.buy(symbol, current_price, current_dt, idx, strategy_module.__name__, mode, fixed_qty)
 
         elif signal == "SELL" and position_qty > 0:
-            sale_revenue = position_qty * current_price
-            cash += sale_revenue
+            # Delegate sell math and logging to the class
+            port.sell(symbol, current_price, current_dt, idx, strategy_module.__name__)
 
-            pnl_dollars = (current_price - entry_price) * position_qty
-            pnl_pct = ((current_price - entry_price) / entry_price) * 100
-            bars_held = idx - entry_bar_index
 
-            trades.append({
-                "symbol": symbol,
-                "strategy_used": strategy_module.__name__,
-                "entry_time": entry_time,
-                "exit_time": current_dt,
-                "entry_price": entry_price,
-                "exit_price": current_price,
-                "quantity": position_qty,
-                "pnl_dollars": pnl_dollars,
-                "pnl_pct": pnl_pct,
-                "bars_held": bars_held
-            })
-
-            position_qty = 0
-            entry_price = 0.0
-
-    if position_qty > 0:
+    # Force close any open positions at the end of the simulation
+    if port.get_position(symbol)['qty'] > 0:
         final_price = simulation_bars[-1]['close']
         final_dt = simulation_bars[-1]['datetime']
-        pnl_dollars = (final_price - entry_price) * position_qty
-        pnl_pct = ((final_price - entry_price) / entry_price) * 100
-        cash += position_qty * final_price
+        port.sell(symbol, final_price, final_dt, len(formatted_bars), strategy_module.__name__)
 
-        trades.append({
-            "symbol": symbol,
-            "strategy_used": strategy_module.__name__,
-            "entry_time": entry_time,
-            "exit_time": final_dt,
-            "entry_price": entry_price,
-            "exit_price": final_price,
-            "quantity": position_qty,
-            "pnl_dollars": pnl_dollars,
-            "pnl_pct": pnl_pct,
-            "bars_held": len(formatted_bars) - entry_bar_index
-        })
-
-    final_balance = cash
+    # Extract final stats from the Portfolio object
+    final_balance = port.cash
     total_net_pnl = final_balance - control.STARTING_CASH_PER_TICKER
+    trades = port.trade_log
 
     # Keep B&H pct for the multi-ticker aggregator
     start_stock_price = formatted_bars[lookback_window]['close']
@@ -237,7 +189,7 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
         "equity_curve": equity_curve,
         "timestamps": timestamps,
         "bars_count": len(formatted_bars),
-        "metrics": generated_metrics  # Attach the dynamic dictionary here
+        "metrics": generated_metrics
     }
     
     try:
@@ -248,16 +200,8 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
         
     return result_dict
 
-
 # =====================================================================
-# 4. MONTE CARLO SIMULATION (Fast Vectorized Implementation)
-# =====================================================================
-
-# Restructured
-
-
-# =====================================================================
-# 5. MULTI-TICKER RUNNER & REGIME AGGREGATOR
+# 3. MULTI-TICKER RUNNER & REGIME AGGREGATOR
 # =====================================================================
 
 def run_backtest():
@@ -267,7 +211,7 @@ def run_backtest():
         if hasattr(control, "ACTIVE_STRATEGY"):
             strategies_to_test = [control.ACTIVE_STRATEGY]
         else:
-            print("❌ ERROR: No active strategy found in BacktestControlCenter.py")
+            print("❌ ERROR: No active strategy found in backtest_control_center.py")
             return
 
     enable_taxes = getattr(control, "ENABLE_TAXES", False)
@@ -310,7 +254,7 @@ def run_backtest():
         strategy_config = current_strategy.get_params()
         bar_resolution = strategy_config["bar_resolution"]
         
-        backtest_reporter.print_strategy_header(
+        reporter.print_strategy_header(
             current_strategy.__name__, 
             bar_resolution, 
             strategy_config['lookback'], 
@@ -496,7 +440,7 @@ def run_backtest():
                     "spy_return_pct": spy_metrics["bench_return_pct"] if spy_metrics else None
                 })
 
-            backtest_reporter.print_regime_summary(
+            reporter.print_regime_summary(
                 regime_name, len(target_universe), len(all_results), gross_pnl, gross_pnl_pct, 
                 enable_taxes, tax_label, tax_impact, aggregate_pnl, aggregate_pnl_pct, 
                 avg_buy_hold_pct, spy_metrics, total_trade_count, win_rate, wins_count, 
@@ -508,7 +452,7 @@ def run_backtest():
         # MASTER GLOBAL SUMMARY ACROSS ALL REGIMES FOR THIS STRATEGY
         # =====================================================================
         if global_summary["total_symbols_evaluated"] > 0:
-            backtest_reporter.print_global_summary(
+            reporter.print_global_summary(
                 current_strategy.__name__, 
                 global_summary, 
                 enable_taxes, 
@@ -541,9 +485,9 @@ def run_backtest():
     # =====================================================================
     # 💥 ULTIMATE STRATEGY COMPARISON MATRIX & DATA EXPORTS 💥
     # =====================================================================
-    export_summary_rows = backtest_reporter.generate_comparison_matrix(multi_strategy_results)
+    export_summary_rows = reporter.generate_comparison_matrix(multi_strategy_results)
 
-    backtest_reporter.save_and_export_data(
+    reporter.save_and_export_data(
         enable_taxes=enable_taxes,
         tax_rate=tax_rate,
         starting_cash=control.STARTING_CASH_PER_TICKER,
