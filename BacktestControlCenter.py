@@ -1,10 +1,12 @@
 import M5breakout
 import M5support
+import M5supportsafe
 
 # =====================================================================
 # 1. STRATEGY SELECTION
 # =====================================================================
-ACTIVE_STRATEGY = M5support
+# The backtester will now run each of these in sequence and compare them at the end.
+ACTIVE_STRATEGIES = [M5support, M5breakout]
 
 # =====================================================================
 # 2. BACKTEST ENGINE CONFIGURATION
