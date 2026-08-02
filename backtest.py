@@ -16,8 +16,10 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 # Control center owns: which strategy, which tickers, bar resolution, etc.
-import BacktestControlCenter as control
+import backtest_control_center as control
 import metrics
+import data_engine
+import monte_carlo
 
 # Load API environment variables
 load_dotenv()
@@ -42,76 +44,7 @@ def get_periods_per_year(resolution_str, default=19500):
 # 2. DEEP HISTORY DATA FETCHER (DATABENTO)
 # =====================================================================
 
-CACHE_DIR = "data_cache"
-if not os.path.exists(CACHE_DIR):
-    os.makedirs(CACHE_DIR)
-
-def fetch_deep_history(symbol, resolution, start_date_str, end_date_str, provider="DATABENTO"):
-    formatted_bars = []
-    
-    if provider == "DATABENTO":
-        cache_file = os.path.join(CACHE_DIR, f"{symbol}_{start_date_str}_{end_date_str}_1m.parquet")
-        
-        if os.path.exists(cache_file):
-            df = pd.read_parquet(cache_file)
-        else:
-            db_key = os.environ.get("DATABENTO_API_KEY")
-            if not db_key:
-                return []
-                
-            try:
-                client = db.Historical(db_key)
-                
-                raw_data = client.timeseries.get_range(
-                    dataset="XNAS.ITCH",
-                    schema="ohlcv-1m",
-                    symbols=symbol,
-                    start=start_date_str,
-                    end=end_date_str,
-                )
-                
-                df = raw_data.to_df()
-                
-                if df.empty:
-                    return []
-                    
-                df.to_parquet(cache_file)
-                
-            except Exception as e:
-                return []
-
-        if df.index.tz is None:
-            df.index = df.index.tz_localize('UTC')
-
-        resample_map = {
-            "M1": "1min",
-            "M5": "5min",
-            "M15": "15min",
-            "M30": "30min",
-            "H1": "1h",
-            "D1": "1D"
-        }
-        pd_resolution = resample_map.get(resolution.upper(), "1min")
-        
-        resampled_df = df.resample(pd_resolution).agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'volume': 'sum'
-        }).dropna()
-        
-        for dt, row in resampled_df.iterrows():
-            formatted_bars.append({
-                "datetime": dt.to_pydatetime(),
-                "open": float(row['open']),
-                "high": float(row['high']),
-                "low": float(row['low']),
-                "close": float(row['close']),
-                "volume": float(row['volume'])
-            })
-            
-    return formatted_bars
+# Restructured
 
 
 # =====================================================================
@@ -151,7 +84,7 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
         except Exception:
             pass
 
-    formatted_bars = fetch_deep_history(
+    formatted_bars = data_engine.fetch_deep_history(
         symbol=symbol,
         resolution=strategy_config["bar_resolution"],
         start_date_str=start_date,
@@ -319,108 +252,8 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
 # 4. MONTE CARLO SIMULATION (Fast Vectorized Implementation)
 # =====================================================================
 
-def run_monte_carlo_simulation(all_trades, starting_capital, avg_buy_hold_pct=0.0, spy_return_pct=None, num_simulations=1000, ruin_threshold_pct=20.0, title="ADVANCED MONTE CARLO STRESS TEST"):
-    """
-    Runs the vectorized Monte Carlo stress test AND returns its computed
-    stats as a dict, so callers (like the dashboard report) can persist
-    the results instead of them only living in the terminal print-out.
-    """
-    if not all_trades:
-        print("⚠️ No trades available for Monte Carlo simulation.")
-        return None
+# Restructured
 
-    trade_pnl_dollars = np.array([t["pnl_dollars"] for t in all_trades])
-    num_trades = len(trade_pnl_dollars)
-
-    simulated_pnl = np.random.choice(trade_pnl_dollars, size=(num_simulations, num_trades), replace=True)
-    equity_curves = starting_capital + np.cumsum(simulated_pnl, axis=1)
-    
-    final_balances = equity_curves[:, -1]
-    running_max = np.maximum.accumulate(equity_curves, axis=1)
-    running_max = np.maximum(starting_capital, running_max)
-    
-    drawdowns = (running_max - equity_curves) / running_max * 100
-    max_drawdowns_pct = np.max(drawdowns, axis=1)
-    
-    hit_ruin = max_drawdowns_pct >= ruin_threshold_pct
-    ruin_count = np.sum(hit_ruin)
-    
-    sim_return_pct = ((final_balances - starting_capital) / starting_capital) * 100
-    
-    beat_bh_count = np.sum(sim_return_pct > avg_buy_hold_pct)
-    beat_spy_count = np.sum(sim_return_pct > spy_return_pct) if spy_return_pct is not None else None
-    
-    is_loss = simulated_pnl < 0
-    max_streaks = np.zeros(num_simulations, dtype=int)
-    for i in range(num_simulations):
-        streak = 0
-        max_s = 0
-        for val in is_loss[i]:
-            if val:
-                streak += 1
-                if streak > max_s:
-                    max_s = streak
-            else:
-                streak = 0
-        max_streaks[i] = max_s
-
-    pnl_array = final_balances - starting_capital
-    prob_profitable = (np.sum(pnl_array > 0) / num_simulations) * 100
-    prob_beat_bh = (beat_bh_count / num_simulations) * 100
-    prob_beat_spy = (beat_spy_count / num_simulations) * 100 if beat_spy_count is not None else None
-    risk_of_ruin = (ruin_count / num_simulations) * 100
-
-    p5_final = np.percentile(final_balances, 5)
-    p25_final = np.percentile(final_balances, 25)
-    p50_final = np.percentile(final_balances, 50)
-    p75_final = np.percentile(final_balances, 75)
-    p95_final = np.percentile(final_balances, 95)
-    p50_dd = np.percentile(max_drawdowns_pct, 50)
-    p95_dd = np.percentile(max_drawdowns_pct, 95)
-    p50_streak = int(np.percentile(max_streaks, 50))
-    p95_streak = int(np.percentile(max_streaks, 95))
-
-    print("\n" + "=" * 115)
-    print(f"                            {title} ({num_simulations:,} Iterations)           ")
-    print("=" * 115)
-    print(f" 🎯 Overall Win Probability:     {prob_profitable:.1f}% of outcomes ended in net profit")
-    print(f" 📈 Prob. of Beating Tickers B&H: {prob_beat_bh:.1f}% (vs Avg B&H: {avg_buy_hold_pct:+.2f}%)")
-    if prob_beat_spy is not None:
-        print(f" 🏆 Prob. of Beating SPY:         {prob_beat_spy:.1f}% (vs SPY: {spy_return_pct:+.2f}%)")
-    else:
-        print(f" 🏆 Prob. of Beating SPY:         N/A (SPY data unavailable)")
-    print(f" ⚠️ Risk of Ruin (≥{ruin_threshold_pct:.0f}% Drawdown): {risk_of_ruin:.1f}% chance of hitting account distress")
-    print("-" * 115)
-    print(" 📊 EXPECTED RETURN DISTRIBUTION (Pre-Tax basis for probabilistic modeling):")
-    print(f"    • 95th Percentile (Optimistic): ${p95_final:,.2f}  (+{(p95_final-starting_capital)/starting_capital*100:+.2f}%)")
-    print(f"    • 75th Percentile:              ${p75_final:,.2f}  (+{(p75_final-starting_capital)/starting_capital*100:+.2f}%)")
-    print(f"    • 50th Percentile (Median):     ${p50_final:,.2f}  (+{(p50_final-starting_capital)/starting_capital*100:+.2f}%)")
-    print(f"    • 25th Percentile:              ${p25_final:,.2f}  (+{(p25_final-starting_capital)/starting_capital*100:+.2f}%)")
-    print(f"    • 5th Percentile  (Pessimistic): ${p5_final:,.2f}  (+{(p5_final-starting_capital)/starting_capital*100:+.2f}%)")
-    print("-" * 115)
-    print(" 📉 RISK & STREAK METRICS:")
-    print(f"    • Median Drawdown vs. 95% Worst Case:   -{p50_dd:.2f}%  |  95th %ile: -{p95_dd:.2f}%")
-    print(f"    • Median Loss Streak vs. 95% Worst Case: {p50_streak} losses in a row  |  95th %ile: {p95_streak} in a row")
-    print("=" * 115 + "\n")
-
-    return {
-        "title": title,
-        "num_simulations": num_simulations,
-        "prob_profitable": float(prob_profitable),
-        "prob_beat_bh": float(prob_beat_bh),
-        "avg_buy_hold_pct": float(avg_buy_hold_pct),
-        "prob_beat_spy": float(prob_beat_spy) if prob_beat_spy is not None else None,
-        "spy_return_pct": float(spy_return_pct) if spy_return_pct is not None else None,
-        "risk_of_ruin": float(risk_of_ruin),
-        "ruin_threshold_pct": float(ruin_threshold_pct),
-        "starting_capital": float(starting_capital),
-        "percentiles": {
-            "p5": float(p5_final), "p25": float(p25_final), "p50": float(p50_final),
-            "p75": float(p75_final), "p95": float(p95_final),
-        },
-        "drawdown_percentiles": {"p50": float(p50_dd), "p95": float(p95_dd)},
-        "streak_percentiles": {"p50": p50_streak, "p95": p95_streak},
-    }
 
 # =====================================================================
 # 5. MULTI-TICKER RUNNER & REGIME AGGREGATOR
@@ -773,7 +606,7 @@ def run_backtest():
             if mc_tasks:
                 print(f"🎲 Running Vectorized Monte Carlo Simulations for {len(mc_tasks)} Regimes on {current_strategy.__name__}...")
                 for task in mc_tasks:
-                    mc_result = run_monte_carlo_simulation(
+                    mc_result = monte_carlo.run_monte_carlo_simulation(
                         all_trades=task["all_trades"],
                         starting_capital=task["starting_capital"],
                         avg_buy_hold_pct=task["avg_buy_hold_pct"],
