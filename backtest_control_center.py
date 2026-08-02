@@ -9,7 +9,7 @@ from strategies.FiveMinute.Support import M5vixsupport
 # 1. STRATEGY SELECTION
 # =====================================================================
 # The backtester will now run each of these in sequence and compare them at the end.
-ACTIVE_STRATEGIES = [M5vixsupport]  # List of strategies to run, buggy when optimizing with multiple active
+ACTIVE_STRATEGIES = [M5vixsupport, M5supportsafe]  # List of strategies to run, buggy when optimizing with multiple active
 
 # =====================================================================
 # 2. BACKTEST ENGINE CONFIGURATION
@@ -31,7 +31,7 @@ ORDINARY_INCOME_TAX_RATE = 0.24   # 24% Federal
 # =====================================================================
 # 5. REGIME & UNIVERSE MAPPING
 # =====================================================================
-ACTIVE_ASSET_TYPE = "ETFS"  # Toggle this between "STOCKS" or "ETFS"
+ACTIVE_ASSET_TYPE = "STOCKS"  # Toggle this between "STOCKS" or "ETFS"
 
 REGIME_WINDOWS = {
     "covid_crash_2020": {

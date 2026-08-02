@@ -229,8 +229,25 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
 # 3. MULTI-TICKER RUNNER & REGIME AGGREGATOR
 # =====================================================================
 
-def run_backtest():
-    
+def run_backtest(regime_evaluator=None, target_strategy_name=None):
+    """
+    target_strategy_name: if provided (a strategy module's __name__, e.g.
+    M5vixsupport.__name__), restricts this run to ONLY that strategy —
+    other entries in control.ACTIVE_STRATEGIES are skipped entirely rather
+    than being backtested and discarded. This matters for two reasons:
+      1. Performance: a caller like optimize_vix.py that's tuning one
+         strategy shouldn't pay the cost of fully backtesting every other
+         strategy in ACTIVE_STRATEGIES on every trial.
+      2. Correctness: the return-value section below used to always grab
+         multi_strategy_results[0], which only happened to be right because
+         the tuned strategy was first in the list — reordering
+         ACTIVE_STRATEGIES, or a strategy silently producing zero results,
+         would have silently scored the WRONG strategy. Passing
+         target_strategy_name makes the match explicit instead of
+         positional.
+    Leave it as None for the normal multi-strategy comparison CLI run
+    (`python backtest.py`) — behavior there is unchanged.
+    """
     strategies_to_test = getattr(control, "ACTIVE_STRATEGIES", [])
     if not strategies_to_test:
         if hasattr(control, "ACTIVE_STRATEGY"):
@@ -238,6 +255,12 @@ def run_backtest():
         else:
             print("❌ ERROR: No active strategy found in backtest_control_center.py")
             return {"total_trades": 0, "win_rate": 0.0, "error": "no_active_strategy"}
+
+    if target_strategy_name is not None:
+        strategies_to_test = [s for s in strategies_to_test if s.__name__ == target_strategy_name]
+        if not strategies_to_test:
+            print(f"❌ ERROR: target_strategy_name='{target_strategy_name}' not found in ACTIVE_STRATEGIES.")
+            return {"total_trades": 0, "win_rate": 0.0, "error": "target_strategy_not_found"}
 
     enable_taxes = getattr(control, "ENABLE_TAXES", False)
     if enable_taxes:
@@ -425,6 +448,13 @@ def run_backtest():
             else:
                 profit_factor = 0.0
 
+            # =====================================================================
+            # 🛑 EARLY STOPPING HOOK (Zero-Coupling)
+            # =====================================================================
+            if regime_evaluator:
+                regime_evaluator(regime_name, total_trade_count, aggregate_pnl)
+            # =====================================================================
+
             global_summary["total_symbols_evaluated"] += len(all_results)
             global_summary["total_initial_capital"] += total_initial_capital
             global_summary["total_ending_capital_pre_tax"] += total_ending_capital_pre_tax
@@ -525,15 +555,22 @@ def run_backtest():
     # =====================================================================
     # 🔁 RETURN VALUE FOR PROGRAMMATIC CALLERS (e.g. optimize_vix.py)
     # =====================================================================
-    # run_backtest() previously had no return statement anywhere, so any
-    # caller doing `results = run_backtest(); results.get(...)` always got
-    # None back and crashed — regardless of which parameters were tested.
-    # This builds a summary from the first tested strategy's aggregated
-    # global_summary (optimize_vix.py only ever tests one strategy per run,
-    # via ACTIVE_STRATEGIES = [M5vixsupport]), so callers have real stats
-    # to read.
     if multi_strategy_results:
-        primary_summary = multi_strategy_results[0]["global_summary"]
+        if target_strategy_name is not None:
+            matches = [r for r in multi_strategy_results if r["name"] == target_strategy_name]
+            if not matches:
+                return {"total_trades": 0, "win_rate": 0.0, "error": "target_strategy_produced_no_results"}
+            primary_summary = matches[0]["global_summary"]
+        else:
+            if len(multi_strategy_results) > 1:
+                print(
+                    f"⚠️ WARNING: run_backtest() was called without target_strategy_name but "
+                    f"{len(multi_strategy_results)} strategies were tested. Returning results for "
+                    f"'{multi_strategy_results[0]['name']}' (first in ACTIVE_STRATEGIES) — pass "
+                    f"target_strategy_name explicitly if this isn't the one you meant."
+                )
+            primary_summary = multi_strategy_results[0]["global_summary"]
+
         total_trades = primary_summary.get("total_trades", 0)
         total_wins = primary_summary.get("total_wins", 0)
         win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0.0
