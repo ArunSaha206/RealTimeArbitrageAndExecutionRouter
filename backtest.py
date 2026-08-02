@@ -81,6 +81,16 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
         provider=control.HISTORICAL_PROVIDER
     )
 
+    # Fetch VIX data for this date window
+    vix_map = data_engine.fetch_vix_series(start_date, end_date)
+
+    # Inject VIX value into each bar so strategies can read it natively
+    for bar in formatted_bars:
+        bar_dt = bar['datetime']
+        bar_date = bar_dt.date() if hasattr(bar_dt, 'date') else pd.to_datetime(bar_dt).date()
+        # Assign matching VIX or look for the most recent available day's print
+        bar['vix_open'] = vix_map.get(bar_date, 15.0) # Defaults to 15.0 baseline if missing
+
     if not formatted_bars:
         return None
 
@@ -103,6 +113,14 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
 
     analyze_sig = inspect.signature(strategy_module.analyze)
     has_entry_price = 'entry_price' in analyze_sig.parameters
+    # Some strategies (e.g. M5vixsupport) accept tunable divisor/exponent
+    # params. These MUST be threaded through strategy_config (already passed
+    # into this function as a plain argument, so it survives being pickled
+    # to a ProcessPoolExecutor worker) rather than read off the strategy
+    # module's own globals — mutating a module global in the parent process
+    # (e.g. from an optimizer) does not propagate to separately-spawned
+    # worker processes.
+    has_vix_params = 'divisor' in analyze_sig.parameters and 'exponent' in analyze_sig.parameters
 
     for idx, bar in enumerate(simulation_bars, start=lookback_window):
         current_price = bar['close']
@@ -118,20 +136,27 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
         equity_curve.append(port.get_equity(symbol, current_price))
         timestamps.append(current_dt)
 
+        extra_kwargs = {}
+        if has_vix_params:
+            extra_kwargs['divisor'] = strategy_config.get('vix_divisor')
+            extra_kwargs['exponent'] = strategy_config.get('vix_exponent')
+
         if has_entry_price:
             signal_result = strategy_module.analyze(
                 rolling_buffer,
                 lookback=strategy_config["lookback"],
                 exit_lookback=strategy_config.get("exit_lookback", 10),
                 current_position=position_qty,
-                entry_price=entry_price
+                entry_price=entry_price,
+                **extra_kwargs
             )
         else:
             signal_result = strategy_module.analyze(
                 rolling_buffer,
                 lookback=strategy_config["lookback"],
                 exit_lookback=strategy_config.get("exit_lookback", 10),
-                current_position=position_qty
+                current_position=position_qty,
+                **extra_kwargs
             )
 
         signal = signal_result.get("signal", "HOLD")
@@ -212,7 +237,7 @@ def run_backtest():
             strategies_to_test = [control.ACTIVE_STRATEGY]
         else:
             print("❌ ERROR: No active strategy found in backtest_control_center.py")
-            return
+            return {"total_trades": 0, "win_rate": 0.0, "error": "no_active_strategy"}
 
     enable_taxes = getattr(control, "ENABLE_TAXES", False)
     if enable_taxes:
@@ -496,6 +521,32 @@ def run_backtest():
         master_trade_log=master_trade_log,
         cache_dir=RESULTS_CACHE_DIR
     )
+
+    # =====================================================================
+    # 🔁 RETURN VALUE FOR PROGRAMMATIC CALLERS (e.g. optimize_vix.py)
+    # =====================================================================
+    # run_backtest() previously had no return statement anywhere, so any
+    # caller doing `results = run_backtest(); results.get(...)` always got
+    # None back and crashed — regardless of which parameters were tested.
+    # This builds a summary from the first tested strategy's aggregated
+    # global_summary (optimize_vix.py only ever tests one strategy per run,
+    # via ACTIVE_STRATEGIES = [M5vixsupport]), so callers have real stats
+    # to read.
+    if multi_strategy_results:
+        primary_summary = multi_strategy_results[0]["global_summary"]
+        total_trades = primary_summary.get("total_trades", 0)
+        total_wins = primary_summary.get("total_wins", 0)
+        win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0.0
+
+        return {
+            "total_trades": total_trades,
+            "win_rate": win_rate,
+            "global_summary": primary_summary,
+            "multi_strategy_results": multi_strategy_results,
+            "comparison_matrix": export_summary_rows,
+        }
+
+    return {"total_trades": 0, "win_rate": 0.0, "error": "no_results_evaluated"}
 
 if __name__ == "__main__":
     run_backtest()
