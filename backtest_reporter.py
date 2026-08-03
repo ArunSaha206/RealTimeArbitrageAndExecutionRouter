@@ -16,6 +16,16 @@ def print_strategy_header(strategy_name, bar_resolution, lookback, position_mode
     console.rule(f"[header]NOW RUNNING STRATEGY: {display_name} | Res={bar_resolution} | Lookback={lookback} | Sizing={position_mode}[/header]")
     console.print()
 
+def print_regime_header(regime_name, start_date, end_date):
+    console.print()
+    console.rule(f"📅 EXECUTING REGIME: [bold cyan]{regime_name.upper()}[/bold cyan] ({start_date} to {end_date})", style="white")
+    console.print()
+
+def print_monte_carlo_header(strategy_name, num_regimes):
+    # Slice off the module path to keep the name clean
+    display_name = strategy_name.split('.')[-1]
+    console.print(f"\n[bold white]🎲 Running Vectorized Monte Carlo Simulations for [cyan]{num_regimes}[/cyan] Regimes on [cyan]{display_name}[/cyan]...[/bold white]\n")
+
 def print_regime_summary(strategy_name, regime_name, target_universe_size, all_results_len, gross_pnl, gross_pnl_pct, 
                          enable_taxes, tax_label, tax_impact, aggregate_pnl, aggregate_pnl_pct, 
                          avg_buy_hold_pct, spy_metrics, total_trade_count, win_rate, wins_count, 

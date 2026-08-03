@@ -327,9 +327,7 @@ def run_backtest(regime_evaluator=None, target_strategy_name=None):
         mc_tasks = []
 
         for regime_name, config in regimes.items():
-            print("=" * 115)
-            print(f" 📅 EXECUTING REGIME: {regime_name.upper()} ({config['start']} to {config['end']})")
-            print("=" * 115)
+            reporter.print_regime_header(regime_name, config['start'], config['end'])
 
             all_results = []
             all_trades = []
@@ -515,7 +513,7 @@ def run_backtest(regime_evaluator=None, target_strategy_name=None):
             )
             
             if mc_tasks:
-                print(f"🎲 Running Vectorized Monte Carlo Simulations for {len(mc_tasks)} Regimes on {current_strategy.__name__}...")
+                reporter.print_monte_carlo_header(current_strategy.__name__, len(regimes))
                 for task in mc_tasks:
                     mc_result = monte_carlo.run_monte_carlo_simulation(
                         all_trades=task["all_trades"],
