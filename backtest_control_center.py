@@ -1,7 +1,6 @@
-from strategies.FiveMinute.Support import M5support
-from strategies.FiveMinute.Support import M5supportsafe
-from strategies.FiveMinute.Support import M5supportsafesafe
-from strategies.FiveMinute.Support import M5supportsafesafesafe
+from strategies.FiveMinute.Support import M5supportR3
+from strategies.FiveMinute.Support import M5supportR2
+from strategies.FiveMinute.Support import M5supportR1
 from strategies.FiveMinute.Support import M5vixsupport
 
 
@@ -9,7 +8,7 @@ from strategies.FiveMinute.Support import M5vixsupport
 # 1. STRATEGY SELECTION
 # =====================================================================
 # The backtester will now run each of these in sequence and compare them at the end.
-ACTIVE_STRATEGIES = [M5vixsupport, M5supportsafe]  # List of strategies to run, buggy when optimizing with multiple active
+ACTIVE_STRATEGIES = [M5supportR1, M5supportR2, M5supportR3]  # List of strategies to run, buggy when optimizing with multiple active
 
 # =====================================================================
 # 2. BACKTEST ENGINE CONFIGURATION

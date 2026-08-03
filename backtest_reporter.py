@@ -4,97 +4,201 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
 
-def print_strategy_header(strategy_name, bar_resolution, lookback, position_mode):
-    print("\n" + "█" * 175)
-    print(f" 🚀 NOW RUNNING STRATEGY: {strategy_name} | Res={bar_resolution} | Lookback={lookback} | Sizing={position_mode} ".center(175))
-    print("█" * 175 + "\n")
+from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
+from console_theme import console
 
-def print_regime_summary(regime_name, target_universe_size, all_results_len, gross_pnl, gross_pnl_pct, 
+def print_strategy_header(strategy_name, bar_resolution, lookback, position_mode):
+    # Slice off the module path to only show the strategy name
+    display_name = strategy_name.split('.')[-1]
+    console.print()
+    console.rule(f"[header]NOW RUNNING STRATEGY: {display_name} | Res={bar_resolution} | Lookback={lookback} | Sizing={position_mode}[/header]")
+    console.print()
+
+def print_regime_summary(strategy_name, regime_name, target_universe_size, all_results_len, gross_pnl, gross_pnl_pct, 
                          enable_taxes, tax_label, tax_impact, aggregate_pnl, aggregate_pnl_pct, 
                          avg_buy_hold_pct, spy_metrics, total_trade_count, win_rate, wins_count, 
                          losses_count, profit_factor, gross_profit, gross_loss, 
                          portfolio_max_dd_dollars, portfolio_max_dd_pct, portfolio_sharpe):
-    """Prints the per-regime summary to the terminal."""
-    print("\n" + "=" * 115)
-    print(f"                     REGIME PORTFOLIO SUMMARY: {regime_name.upper()}                                 ")
-    print("=" * 115)
-    print(f" Total Symbols Evaluated:     {all_results_len} / {target_universe_size}")
-    print(f" Pre-Tax Gross P&L:           ${gross_pnl:+,.2f} ({gross_pnl_pct:+.2f}%)")
+    
+    # Helper to ensure the +/- is strictly formatted before the dollar sign
+    def fmt_money(val):
+        if val == 0: return "$0.00"
+        return f"{'+$' if val > 0 else '-$'}{abs(val):,.2f}"
+
+    text = Text()
+    text.append("\n")
+    
+    # 1. Overview & Stats
+    text.append(f"🌍 Total Symbols Evaluated:       {all_results_len} / {target_universe_size}\n")
+    text.append(f"🔄 Total Trades Executed:         {total_trade_count}\n")
+    if total_trade_count < 100:
+        text.append(f"⚠️  WARNING: Low sample size ({total_trade_count} trades). Sharpe may be statistically unreliable.\n", style="loss")
+        
+    text.append(f"🎯 Win Rate:                      {win_rate:.1f}% ({wins_count} W / {losses_count} L)\n")
+    text.append(f"💰 Profit Factor:                 {profit_factor:.2f} (Gross Profit: ${gross_profit:,.2f} / Gross Loss: ${gross_loss:,.2f})\n\n")
+
+    # 2. Financials
+    text.append("📊 Portfolio Financials:\n", style="bold")
+    
+    pnl_style = "gain" if gross_pnl >= 0 else "loss"
+    text.append(f"   • Pre-Tax Gross P&L:           {fmt_money(gross_pnl):>12}  (")
+    text.append(f"{gross_pnl_pct:+.2f}%", style=pnl_style)
+    text.append(")\n")
     
     if enable_taxes:
-        print(f" {tax_label}: {('+$' if tax_impact > 0 else '-$')}{abs(tax_impact):,.2f}")
+        text.append(f"   • {tax_label}:             {fmt_money(tax_impact):>12}\n")
         
-    print(f" Post-Tax Net P&L:            ${aggregate_pnl:+,.2f} ({aggregate_pnl_pct:+.2f}%)")
-    print(f" Benchmark Average Return:    {avg_buy_hold_pct:+.2f}%")
-    print("-" * 115)
+    net_pnl_style = "gain" if aggregate_pnl >= 0 else "loss"
+    text.append(f"   • Post-Tax Net P&L:            {fmt_money(aggregate_pnl):>12}  (")
+    text.append(f"{aggregate_pnl_pct:+.2f}%", style=net_pnl_style)
+    text.append(")\n\n")
+    
+    # 3. Benchmarks
+    text.append("📈 Benchmark Comparisons:\n", style="bold")
+    text.append(f"   • Benchmark Avg Return:        ")
+    text.append(f"{avg_buy_hold_pct:+.2f}%\n", style="gain" if avg_buy_hold_pct >= 0 else "loss")
     
     if spy_metrics:
-        print(f" Broad Market Beta (β vs SPY): {spy_metrics['beta']:.2f}")
-        print(f" Jensen's Alpha (α vs SPY):    {spy_metrics['alpha_pct']:+.2f}%")
-        print(f" SPY Benchmark Return:        {spy_metrics['bench_return_pct']:+.2f}%")
+        text.append(f"   • SPY Benchmark Return:        ")
+        text.append(f"{spy_metrics['bench_return_pct']:+.2f}%\n", style="gain" if spy_metrics['bench_return_pct'] >= 0 else "loss")
+        text.append(f"   • Broad Market Beta (vs SPY):   {spy_metrics['beta']:.2f}\n")
+        text.append(f"   • Jensen's Alpha (vs SPY):     ")
+        text.append(f"{spy_metrics['alpha_pct']:+.2f}%\n", style="gain" if spy_metrics['alpha_pct'] >= 0 else "loss")
     else:
-        print(f" Broad Market Beta (β vs SPY): N/A (Insufficient daily benchmark alignment)")
-        
-    print("-" * 115)
-    print(f" Total Trades Executed:       {total_trade_count}")
+        text.append(f"   • SPY Benchmark Metrics:       N/A (Insufficient alignment)\n", style="muted")
+    text.append("\n")
     
-    if total_trade_count < 100:
-        print(f" ⚠️ WARNING: Low sample size ({total_trade_count} trades). Sharpe may be statistically unreliable.")
-        
-    print(f" Win Rate:                    {win_rate:.1f}% ({wins_count} W / {losses_count} L)")
-    print(f" Profit Factor:               {profit_factor:.2f} (Gross Profit: ${gross_profit:,.2f} / Gross Loss: ${gross_loss:,.2f})")
-    print(f" Max Portfolio Drawdown:      -${portfolio_max_dd_dollars:,.2f} (-{portfolio_max_dd_pct:.2f}%)")
-    print(f" Portfolio Sharpe Ratio:      {portfolio_sharpe:.2f}")
-    print("=" * 115 + "\n")
+    # 4. Risk
+    text.append("📉 Risk Metrics:\n", style="bold")
+    text.append(f"   • Max Portfolio Drawdown:      -${portfolio_max_dd_dollars:,.2f}  (")
+    text.append(f"-{portfolio_max_dd_pct:.2f}%", style="loss")
+    text.append(")\n")
+    text.append(f"   • Portfolio Sharpe Ratio:      {portfolio_sharpe:.2f}\n")
+
+    display_name = strategy_name.split('.')[-1]
+    panel = Panel(text, title=f"REGIME PORTFOLIO SUMMARY: {regime_name.upper()} ({display_name})", border_style="white", expand=False)
+    console.print(panel)
 
 def print_global_summary(strategy_name, global_summary, enable_taxes, total_regimes):
-    """Prints the aggregated summary across all regimes for a single strategy."""
+    from rich import box
+    
+    # Helper for the summary panel at the bottom (keeps cents)
+    def fmt_money(val):
+        if val == 0: return "$0.00"
+        return f"{'+$' if val > 0 else '-$'}{abs(val):,.2f}"
+
+    # Helper for the table (drops cents to save horizontal space)
+    def fmt_short_money(val):
+        if val == 0: return "$0"
+        return f"{'+$' if val > 0 else '-$'}{abs(val):,.0f}"
+
+    display_name = strategy_name.split('.')[-1]
+    console.print()
+    
+    # Matching the Vibe: Rounded box, white border, emojis in title
+    table = Table(
+        title=f"🌍 MULTI-REGIME SUMMARY FOR: {display_name}", 
+        box=box.ROUNDED,
+        border_style="white",
+        title_style="bold",
+        header_style="bold"
+    )
+    
+    # Compact headers to prevent wrapping
+    table.add_column("REGIME", style="cyan")
+    table.add_column("PRE-$", justify="right")
+    table.add_column("PRE-%", justify="right")
+    table.add_column("TAX", justify="right")
+    table.add_column("POST-$", justify="right")
+    table.add_column("POST-%", justify="right")
+    table.add_column("B&H%", justify="right")
+    table.add_column("TRADES", justify="right")
+    table.add_column("WIN%", justify="right")
+    table.add_column("PF", justify="right")
+    table.add_column("SHARPE", justify="right")
+    table.add_column("MAX DD", justify="right")
+    table.add_column("BETA", justify="right")
+    table.add_column("ALPHA", justify="right")
+
+    for rs in global_summary["regime_summaries"]:
+        beta_str = f"{rs['beta']:.2f}" if rs['beta'] is not None else "N/A"
+        
+        # Colorize Alpha and B&H
+        if rs['alpha'] is not None:
+            alpha_str = f"[{'gain' if rs['alpha'] >= 0 else 'loss'}]{rs['alpha']:+.1f}%[/]"
+        else:
+            alpha_str = "N/A"
+            
+        bh_str = f"[{'gain' if rs['bh_pct'] >= 0 else 'loss'}]{rs['bh_pct']:+.1f}%[/]"
+        
+        t_imp = rs['tax_impact']
+        tax_str = fmt_short_money(t_imp) if enable_taxes else "$0"
+        
+        pre_color = "gain" if rs['pre_tax_pnl'] >= 0 else "loss"
+        post_color = "gain" if rs['post_tax_pnl'] >= 0 else "loss"
+
+        table.add_row(
+            rs['name'][:18],
+            fmt_short_money(rs['pre_tax_pnl']),
+            f"[{pre_color}]{rs['pre_tax_pnl_pct']:+.1f}%[/]",
+            tax_str,
+            fmt_short_money(rs['post_tax_pnl']),
+            f"[{post_color}]{rs['post_tax_pnl_pct']:+.1f}%[/]",
+            bh_str,
+            str(rs['trades']),
+            f"{rs['win_rate']:.1f}%",
+            f"{rs['pf']:.2f}",
+            f"{rs['sharpe']:.2f}",
+            f"[loss]-{rs['max_dd_pct']:.1f}%[/]",
+            beta_str,
+            alpha_str
+        )
+
+    console.print(table)
+    
+    # ---------------------------------------------------------
+    # GLOBAL AGGREGATES PANEL
+    # ---------------------------------------------------------
     g_pnl_pre_tax = global_summary["total_ending_capital_pre_tax"] - global_summary["total_initial_capital"]
     g_pnl_pct_pre_tax = (g_pnl_pre_tax / global_summary["total_initial_capital"]) * 100 if global_summary["total_initial_capital"] > 0 else 0.0
-    
     g_pnl_post_tax = global_summary["total_ending_capital_post_tax"] - global_summary["total_initial_capital"]
     g_pnl_pct_post_tax = (g_pnl_post_tax / global_summary["total_initial_capital"]) * 100 if global_summary["total_initial_capital"] > 0 else 0.0
-
     global_win_rate = (global_summary["total_wins"] / global_summary["total_trades"] * 100) if global_summary["total_trades"] > 0 else 0.0
     global_pf = (global_summary["total_gross_profit"] / global_summary["total_gross_loss"]) if global_summary["total_gross_loss"] > 0 else 0.0
     avg_global_bh = np.mean(global_summary["bh_returns"]) if global_summary["bh_returns"] else 0.0
 
-    print("\n" + "★" * 175)
-    print(f"{'🌟 MULTI-REGIME SUMMARY FOR: ' + strategy_name + ' (PRE-TAX VS. POST-TAX) 🌟':^175}")
-    print("★" * 175)
+    agg_text = Text()
+    agg_text.append("\n")
+    agg_text.append(f"🌍 Total Symbols Evaluated:       {global_summary['total_symbols_evaluated']}\n")
+    agg_text.append(f"🔄 Total Trades Executed:         {global_summary['total_trades']}\n")
+    agg_text.append(f"🎯 Global Win Rate:               {global_win_rate:.1f}% ({global_summary['total_wins']} W / {global_summary['total_losses']} L)\n")
+    agg_text.append(f"💰 Global Profit Factor:          {global_pf:.2f}\n\n")
 
-    print(f"{'REGIME':<18} | {'PRE-TAX P&L ($)':>15} | {'PRE-TAX (%)':>11} | {'TAX IMPACT ($)':>14} | {'POST-TAX P&L ($)':>16} | {'POST-TAX (%)':>12} | {'B&H (%)':>8} | {'TRADES':>6} | {'WIN %':>6} | {'PF':>5} | {'SHARPE':>6} | {'MAX DD':>8} | {'BETA':>5} | {'ALPHA (%)':>9}")
-    print("-" * 175)
-    for rs in global_summary["regime_summaries"]:
-        r_name = rs['name'][:18]
-        beta_str = f"{rs['beta']:>5.2f}" if rs['beta'] is not None else " N/A "
-        alpha_str = f"{rs['alpha']:>8.2f}%" if rs['alpha'] is not None else "  N/A   "
-        
-        t_imp = rs['tax_impact']
-        tax_str = f"{'+$' if t_imp > 0 else '-$'}{abs(t_imp):>9,.2f}" if enable_taxes else "$0.00"
-        
-        print(f"{r_name:<18} | ${rs['pre_tax_pnl']:>14,.2f} | {rs['pre_tax_pnl_pct']:>10.2f}% | {tax_str:>14} | ${rs['post_tax_pnl']:>15,.2f} | {rs['post_tax_pnl_pct']:>11.2f}% | {rs['bh_pct']:>7.2f}% | {rs['trades']:>6} | {rs['win_rate']:>5.1f}% | {rs['pf']:>4.2f} | {rs['sharpe']:>6.2f} | -{rs['max_dd_pct']:>6.2f}% | {beta_str} | {alpha_str}")
-    print("-" * 175)
-
-    print(f" Total Regimes Tested:        {total_regimes}")
-    print(f" Total Symbols Evaluated:     {global_summary['total_symbols_evaluated']}")
-    print(f" Total Cumulative Capital:    ${global_summary['total_initial_capital']:,.2f}")
-    print("-" * 175)
-    print(f" Global Gross P&L (PRE-TAX):  ${g_pnl_pre_tax:+,.2f} ({g_pnl_pct_pre_tax:+.2f}%)")
+    agg_text.append("📊 Global Financials:\n", style="bold")
+    agg_text.append(f"   • Total Initial Capital:       ${global_summary['total_initial_capital']:,.2f}\n")
+    
+    agg_text.append(f"   • Global Pre-Tax P&L:          {fmt_money(g_pnl_pre_tax):>13}  (")
+    agg_text.append(f"{g_pnl_pct_pre_tax:+.2f}%", style="gain" if g_pnl_pre_tax >= 0 else "loss")
+    agg_text.append(")\n")
+    
     if enable_taxes:
         net_tax = global_summary['total_tax_impact']
-        print(f" Global Net Tax Impact:       {('+$' if net_tax > 0 else '-$')}{abs(net_tax):,.2f} {( '(Net Credit)' if net_tax > 0 else '(Net Paid)' )}")
-    print(f" Global Net P&L (POST-TAX):   ${g_pnl_post_tax:+,.2f} ({g_pnl_pct_post_tax:+.2f}%)")
-    print(f" Global Average B&H Return:   {avg_global_bh:+.2f}%")
-    print("-" * 175)
-    print(f" Total Trades Executed:       {global_summary['total_trades']}")
-    print(f" Global Win Rate:             {global_win_rate:.1f}% ({global_summary['total_wins']} W / {global_summary['total_losses']} L)")
-    print(f" Global Profit Factor:        {global_pf:.2f}")
-    print("★" * 175 + "\n")
+        agg_text.append(f"   • Global Net Tax Impact:       {fmt_money(net_tax):>13}  ({ '(Credit)' if net_tax > 0 else '(Paid)' })\n")
+        
+    agg_text.append(f"   • Global Post-Tax P&L:         {fmt_money(g_pnl_post_tax):>13}  (")
+    agg_text.append(f"{g_pnl_pct_post_tax:+.2f}%", style="gain" if g_pnl_post_tax >= 0 else "loss")
+    agg_text.append(")\n\n")
+    
+    agg_text.append("📈 Benchmark Comparisons:\n", style="bold")
+    agg_text.append(f"   • Global Avg B&H Return:       ")
+    agg_text.append(f"{avg_global_bh:+.2f}%\n", style="gain" if avg_global_bh >= 0 else "loss")
 
+    console.print(Panel(agg_text, title=f"GLOBAL AGGREGATES ({display_name})", border_style="white", expand=False))
 
 def generate_comparison_matrix(multi_strategy_results):
-    """Generates and prints the final comparison matrix, returning rows for CSV export."""
+    from rich import box
     export_summary_rows = []
     
     if len(multi_strategy_results) <= 1:
@@ -106,16 +210,39 @@ def generate_comparison_matrix(multi_strategy_results):
             if rs["name"] not in all_regime_names:
                 all_regime_names.append(rs["name"])
 
-    regime_headers_str = " | ".join([f"{(r[:10] + ' W%'):>14}" for r in all_regime_names])
-
-    print("\n" + "🏆" * 95)
-    print(f"{'ULTIMATE STRATEGY COMPARISON MATRIX':^190}")
-    print("🏆" * 95)
-    print(f"{'STRATEGY':<18} | {'PRE-TAX ($)':>12} | {'PRE-TAX (%)':>11} | {'POST-TAX ($)':>13} | {'POST-TAX (%)':>12} | {'OVERALL W%':>10} | {regime_headers_str} | {'PF':>5} | {'AVG SHARPE':>10} | {'AVG MAX DD':>10} | {'AVG BETA':>8}")
-    print("-" * 190)
+    console.print()
+    
+    # Matching the Vibe: Rounded box, white border, emojis in title
+    matrix_table = Table(
+        title="🏆 ULTIMATE STRATEGY COMPARISON MATRIX", 
+        box=box.ROUNDED, 
+        border_style="white",
+        title_style="bold",
+        header_style="bold"
+    )
+    
+    # Compact headers to prevent terminal wrapping and truncation
+    matrix_table.add_column("STRATEGY", style="cyan")
+    matrix_table.add_column("PRE-$", justify="right")
+    matrix_table.add_column("PRE-%", justify="right")
+    matrix_table.add_column("POST-$", justify="right")
+    matrix_table.add_column("POST-%", justify="right")
+    matrix_table.add_column("WIN%", justify="right")
+    
+    for r in all_regime_names:
+        # Extract the first word of the regime (e.g., 'COVID' from 'COVID_CRASH_2020')
+        short_r = r.split('_')[0].upper()
+        matrix_table.add_column(f"{short_r} W%", justify="right")
+        
+    matrix_table.add_column("PF", justify="right")
+    matrix_table.add_column("SHARPE", justify="right")
+    matrix_table.add_column("MAX DD", justify="right")
+    matrix_table.add_column("BETA", justify="right")
 
     for res in multi_strategy_results:
-        name = res["name"][:18]
+        # Isolate the clean display name for rendering only
+        display_name = res["name"].split('.')[-1]
+        
         g_sum = res["global_summary"]
         
         if g_sum["total_symbols_evaluated"] == 0:
@@ -137,7 +264,8 @@ def generate_comparison_matrix(multi_strategy_results):
         pf = (g_sum["total_gross_profit"] / g_sum["total_gross_loss"]) if g_sum["total_gross_loss"] > 0 else 0.0
         
         regime_win_map = {rs["name"]: rs["win_rate"] for rs in g_sum["regime_summaries"]}
-        regime_win_cells = []
+        
+        # Original name stays for safe downstream persistence
         row_export_dict = {
             "Strategy": res["name"],
             "Pre-Tax PnL ($)": round(g_pnl_pre, 2),
@@ -147,14 +275,40 @@ def generate_comparison_matrix(multi_strategy_results):
             "Overall Win Rate (%)": round(overall_win_rate, 2),
         }
 
+        pre_color = "gain" if g_pnl_pre >= 0 else "loss"
+        post_color = "gain" if g_pnl_post >= 0 else "loss"
+
+        # Drop cents (decimals) in the matrix to save horizontal space
+        def fmt_short_money(val):
+            if val == 0: return "$0"
+            return f"{'+$' if val > 0 else '-$'}{abs(val):,.0f}"
+
+        row_cells = [
+            display_name,
+            fmt_short_money(g_pnl_pre),
+            f"[{pre_color}]{g_pnl_pct_pre:+.1f}%[/]",
+            fmt_short_money(g_pnl_post),
+            f"[{post_color}]{g_pnl_pct_post:+.1f}%[/]",
+            f"{overall_win_rate:.1f}%"
+        ]
+
         for r_name in all_regime_names:
             if r_name in regime_win_map:
                 w_val = regime_win_map[r_name]
-                regime_win_cells.append(f"{w_val:>13.1f}%")
+                row_cells.append(f"{w_val:.1f}%")
                 row_export_dict[f"{r_name} Win %"] = round(w_val, 2)
             else:
-                regime_win_cells.append("          N/A ")
+                row_cells.append("N/A")
                 row_export_dict[f"{r_name} Win %"] = "N/A"
+
+        row_cells.extend([
+            f"{pf:.2f}",
+            f"{avg_sharpe:.2f}",
+            f"[loss]-{avg_dd:.1f}%[/]",
+            f"{avg_beta:.2f}"
+        ])
+
+        matrix_table.add_row(*row_cells)
 
         row_export_dict.update({
             "Profit Factor": round(pf, 2),
@@ -165,14 +319,13 @@ def generate_comparison_matrix(multi_strategy_results):
         })
         export_summary_rows.append(row_export_dict)
 
-        regime_win_row_str = " | ".join(regime_win_cells)
-        print(f"{name:<18} | ${g_pnl_pre:>11,.2f} | {g_pnl_pct_pre:>10.2f}% | ${g_pnl_post:>12,.2f} | {g_pnl_pct_post:>11.2f}% | {overall_win_rate:>9.1f}% | {regime_win_row_str} | {pf:>4.2f} | {avg_sharpe:>10.2f} | -{avg_dd:>9.2f}% | {avg_beta:>8.2f}")
-        
-    print("-" * 190 + "\n")
+    console.print(matrix_table)
     return export_summary_rows
 
+
+
+
 def save_and_export_data(enable_taxes, tax_rate, starting_cash, multi_strategy_results, export_summary_rows, master_trade_log, cache_dir):
-    """Saves the Dashboard Pickle and dumps CSV logs."""
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "enable_taxes": enable_taxes,
@@ -185,12 +338,12 @@ def save_and_export_data(enable_taxes, tax_rate, starting_cash, multi_strategy_r
     try:
         with open(report_path, "wb") as f:
             pickle.dump(report, f)
-        print(f"📝 Full report saved for dashboard access: {report_path}")
+        console.print(f"Report saved for dashboard access: {report_path}")
     except Exception as e:
-        print(f"⚠️ Failed to save summary report: {e}")
+        console.print(f"Failed to save summary report: {e}")
 
     if master_trade_log:
-        print(f"💾 EXPORTING DATA TO CSV...")
+        console.print("Exporting data to CSV...")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_dir = os.path.join("archive", f"backtest_results_{timestamp}")
         os.makedirs(out_dir, exist_ok=True)
@@ -208,4 +361,4 @@ def save_and_export_data(enable_taxes, tax_rate, starting_cash, multi_strategy_r
                 trades_df[col] = trades_df[col].apply(lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if isinstance(x, datetime) else x)
         
         trades_df.to_csv(trades_path, index=False)
-        print(f"✅ Success! Your backtest results and raw trade logs have been saved to the folder: {out_dir}/")
+        console.print(f"Success! Backtest results and raw logs saved to: {out_dir}/")

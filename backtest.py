@@ -383,10 +383,10 @@ def run_backtest(regime_evaluator=None, target_strategy_name=None):
             if enable_taxes:
                 if gross_pnl > 0:
                     tax_impact = -(gross_pnl * tax_rate)
-                    tax_label = "Tax Owed (Federal Ordinary Income)"
+                    tax_label = "Tax Owed"
                 else:
                     tax_impact = abs(gross_pnl) * tax_rate
-                    tax_label = "Tax Credit (Business Loss Write-off)"
+                    tax_label = "Tax Credit (Loss Write-off)"
             else:
                 tax_impact = 0.0
                 tax_label = "Taxes"
@@ -496,7 +496,7 @@ def run_backtest(regime_evaluator=None, target_strategy_name=None):
                 })
 
             reporter.print_regime_summary(
-                regime_name, len(target_universe), len(all_results), gross_pnl, gross_pnl_pct, 
+                current_strategy.__name__, regime_name, len(target_universe), len(all_results), gross_pnl, gross_pnl_pct, 
                 enable_taxes, tax_label, tax_impact, aggregate_pnl, aggregate_pnl_pct, 
                 avg_buy_hold_pct, spy_metrics, total_trade_count, win_rate, wins_count, 
                 losses_count, profit_factor, gross_profit, gross_loss, 

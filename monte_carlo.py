@@ -1,4 +1,7 @@
 import numpy as np
+from rich.panel import Panel
+from rich.text import Text
+from console_theme import console
 
 def run_monte_carlo_simulation(all_trades, starting_capital, avg_buy_hold_pct=0.0, spy_return_pct=None, num_simulations=1000, ruin_threshold_pct=20.0, title="ADVANCED MONTE CARLO STRESS TEST"):
     """
@@ -7,7 +10,7 @@ def run_monte_carlo_simulation(all_trades, starting_capital, avg_buy_hold_pct=0.
     the results instead of them only living in the terminal print-out.
     """
     if not all_trades:
-        print("⚠️ No trades available for Monte Carlo simulation.")
+        console.print("[warning]⚠️ No trades available for Monte Carlo simulation.[/warning]")
         return None
 
     trade_pnl_dollars = np.array([t["pnl_dollars"] for t in all_trades])
@@ -61,28 +64,79 @@ def run_monte_carlo_simulation(all_trades, starting_capital, avg_buy_hold_pct=0.
     p50_streak = int(np.percentile(max_streaks, 50))
     p95_streak = int(np.percentile(max_streaks, 95))
 
-    print("\n" + "=" * 115)
-    print(f"                            {title} ({num_simulations:,} Iterations)           ")
-    print("=" * 115)
-    print(f" 🎯 Overall Win Probability:     {prob_profitable:.1f}% of outcomes ended in net profit")
-    print(f" 📈 Prob. of Beating Tickers B&H: {prob_beat_bh:.1f}% (vs Avg B&H: {avg_buy_hold_pct:+.2f}%)")
+    # =====================================================================
+    # NEW RICH UI FORMATTING
+    # =====================================================================
+    text = Text()
+    
+    text.append("\n")
+    text.append(f"🎯 Overall Win Prob:                 {prob_profitable:.1f}% of outcomes ended in net profit\n")
+    
+    text.append(f"📈 Prob of Beating Avg Buy & Hold:   {prob_beat_bh:.1f}% (vs Avg B&H: ")
+    text.append(f"{avg_buy_hold_pct:+.2f}%", style="gain" if avg_buy_hold_pct >= 0 else "loss")
+    text.append(")\n")
+    
     if prob_beat_spy is not None:
-        print(f" 🏆 Prob. of Beating SPY:         {prob_beat_spy:.1f}% (vs SPY: {spy_return_pct:+.2f}%)")
+        text.append(f"🏆 Prob of Beating SPY:              {prob_beat_spy:.1f}% (vs SPY: ")
+        text.append(f"{spy_return_pct:+.2f}%", style="gain" if spy_return_pct >= 0 else "loss")
+        text.append(")\n")
     else:
-        print(f" 🏆 Prob. of Beating SPY:         N/A (SPY data unavailable)")
-    print(f" ⚠️ Risk of Ruin (≥{ruin_threshold_pct:.0f}% Drawdown): {risk_of_ruin:.1f}% chance of hitting account distress")
-    print("-" * 115)
-    print(" 📊 EXPECTED RETURN DISTRIBUTION (Pre-Tax basis for probabilistic modeling):")
-    print(f"    • 95th Percentile (Optimistic): ${p95_final:,.2f}  (+{(p95_final-starting_capital)/starting_capital*100:+.2f}%)")
-    print(f"    • 75th Percentile:              ${p75_final:,.2f}  (+{(p75_final-starting_capital)/starting_capital*100:+.2f}%)")
-    print(f"    • 50th Percentile (Median):     ${p50_final:,.2f}  (+{(p50_final-starting_capital)/starting_capital*100:+.2f}%)")
-    print(f"    • 25th Percentile:              ${p25_final:,.2f}  (+{(p25_final-starting_capital)/starting_capital*100:+.2f}%)")
-    print(f"    • 5th Percentile  (Pessimistic): ${p5_final:,.2f}  (+{(p5_final-starting_capital)/starting_capital*100:+.2f}%)")
-    print("-" * 115)
-    print(" 📉 RISK & STREAK METRICS:")
-    print(f"    • Median Drawdown vs. 95% Worst Case:   -{p50_dd:.2f}%  |  95th %ile: -{p95_dd:.2f}%")
-    print(f"    • Median Loss Streak vs. 95% Worst Case: {p50_streak} losses in a row  |  95th %ile: {p95_streak} in a row")
-    print("=" * 115 + "\n")
+        text.append(f"🏆 Prob of Beating SPY:              N/A (SPY data unavailable)\n", style="muted")
+        
+    # Unhighlighted risk of ruin text label, colored metric
+    text.append(f"❗ Risk of Ruin (≥{ruin_threshold_pct:.0f}% DD):           ")
+    text.append(f"{risk_of_ruin:.1f}% chance of hitting account distress\n\n")
+    
+    text.append("📊 Return Percentile Distribution (Pre-Tax):\n", style="bold")
+    
+    val95 = f"${p95_final:,.2f}"
+    val75 = f"${p75_final:,.2f}"
+    val50 = f"${p50_final:,.2f}"
+    val25 = f"${p25_final:,.2f}"
+    val5 = f"${p5_final:,.2f}"
+
+    pct95 = (p95_final - starting_capital) / starting_capital * 100
+    pct75 = (p75_final - starting_capital) / starting_capital * 100
+    pct50 = (p50_final - starting_capital) / starting_capital * 100
+    pct25 = (p25_final - starting_capital) / starting_capital * 100
+    pct5 = (p5_final - starting_capital) / starting_capital * 100
+
+    text.append(f"   • 95th:       {val95:>11}  (")
+    text.append(f"{pct95:+.2f}%", style="gain" if pct95 >= 0 else "loss")
+    text.append(")\n")
+    
+    text.append(f"   • 75th:       {val75:>11}  (")
+    text.append(f"{pct75:+.2f}%", style="gain" if pct75 >= 0 else "loss")
+    text.append(")\n")
+    
+    text.append(f"   • 50th:       {val50:>11}  (")
+    text.append(f"{pct50:+.2f}%", style="gain" if pct50 >= 0 else "loss")
+    text.append(")\n")
+    
+    text.append(f"   • 25th:       {val25:>11}  (")
+    text.append(f"{pct25:+.2f}%", style="gain" if pct25 >= 0 else "loss")
+    text.append(")\n")
+    
+    text.append(f"   •  5th:       {val5:>11}  (")
+    text.append(f"{pct5:+.2f}%", style="gain" if pct5 >= 0 else "loss")
+    text.append(")\n\n")
+
+    text.append("📉 Risk & Streak Metrics:\n", style="bold")
+    
+    text.append("   • Median  |  95th Percentile Drawdown:       ")
+    text.append(f"-{p50_dd:.2f}%".rjust(11), style="loss")
+    text.append("  |  ")
+    text.append(f"-{p95_dd:.2f}%\n", style="loss")
+    
+    text.append("   • Median  |  95th Percentile Loss Streak:    ")
+    text.append(f"{p50_streak} in a row".rjust(11))
+    text.append(f"  |  {p95_streak} in a row\n")
+
+    panel = Panel(text, title=f"{title} ({num_simulations:,} Iterations)", border_style="white", expand=False)
+    console.print()
+    console.print(panel)
+    console.print()
+    # =====================================================================
 
     return {
         "title": title,
