@@ -136,10 +136,9 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
         equity_curve.append(port.get_equity(symbol, current_price))
         timestamps.append(current_dt)
 
-        extra_kwargs = {}
-        if has_vix_params:
-            extra_kwargs['divisor'] = strategy_config.get('vix_divisor')
-            extra_kwargs['exponent'] = strategy_config.get('vix_exponent')
+        # Dynamically inject all tunable parameters from Optuna into the strategy
+        reserved_keys = ["bar_resolution", "lookback", "exit_lookback", "position_mode", "fixed_share_qty"]
+        extra_kwargs = {k: v for k, v in strategy_config.items() if k not in reserved_keys}
 
         if has_entry_price:
             signal_result = strategy_module.analyze(
@@ -165,19 +164,39 @@ def backtest_single_symbol(symbol, start_date, end_date, strategy_config, strate
             mode = str(strategy_config["position_mode"]).upper().replace("_", "").strip()
             fixed_qty = strategy_config.get("fixed_share_qty", 0)
             
+            # =====================================================================
+            # Option A: Apply slippage to entry price
+            # =====================================================================
+            slippage_pct = getattr(control, "SLIPPAGE_BPS", 0.0) / 10000.0
+            execution_price = current_price * (1.0 + slippage_pct)
+
             # Delegate buy math to the class
-            port.buy(symbol, current_price, current_dt, idx, strategy_module.__name__, mode, fixed_qty)
+            port.buy(symbol, execution_price, current_dt, idx, strategy_module.__name__, mode, fixed_qty)
 
         elif signal == "SELL" and position_qty > 0:
+            
+            # =====================================================================
+            # Option A: Apply slippage to exit price
+            # =====================================================================
+            slippage_pct = getattr(control, "SLIPPAGE_BPS", 0.0) / 10000.0
+            execution_price = current_price * (1.0 - slippage_pct)
+            
             # Delegate sell math and logging to the class
-            port.sell(symbol, current_price, current_dt, idx, strategy_module.__name__)
+            port.sell(symbol, execution_price, current_dt, idx, strategy_module.__name__)
 
 
     # Force close any open positions at the end of the simulation
     if port.get_position(symbol)['qty'] > 0:
         final_price = simulation_bars[-1]['close']
         final_dt = simulation_bars[-1]['datetime']
-        port.sell(symbol, final_price, final_dt, len(formatted_bars), strategy_module.__name__)
+        
+        # =====================================================================
+        # Option A: Apply slippage to forced exit price
+        # =====================================================================
+        slippage_pct = getattr(control, "SLIPPAGE_BPS", 0.0) / 10000.0
+        execution_price = final_price * (1.0 - slippage_pct)
+        
+        port.sell(symbol, execution_price, final_dt, len(formatted_bars), strategy_module.__name__)
 
     # Extract final stats from the Portfolio object
     final_balance = port.cash

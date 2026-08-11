@@ -2,13 +2,14 @@ from strategies.FiveMinute.Support import M5supportR3
 from strategies.FiveMinute.Support import M5supportR2
 from strategies.FiveMinute.Support import M5supportR1
 from strategies.FiveMinute.Support import M5vixsupport
-
+from strategies.FifteenMinute import M15geminiV2
+from strategies.OneHour import H1gemini
 
 # =====================================================================
 # 1. STRATEGY SELECTION
 # =====================================================================
 # The backtester will now run each of these in sequence and compare them at the end.
-ACTIVE_STRATEGIES = [M5supportR1, M5supportR2, M5supportR3]  # List of strategies to run, buggy when optimizing with multiple active
+ACTIVE_STRATEGIES = [M15geminiV2]  # List of strategies to run, buggy when optimizing with multiple active
 
 # =====================================================================
 # 2. BACKTEST ENGINE CONFIGURATION
@@ -28,7 +29,17 @@ ENABLE_TAXES = True               # Toggle tax modeling on/off
 ORDINARY_INCOME_TAX_RATE = 0.24   # 24% Federal
 
 # =====================================================================
-# 5. REGIME & UNIVERSE MAPPING
+# 5. EXECUTION FRICTION CONFIGURATION
+# =====================================================================
+# Slippage in Basis Points (1 bp = 0.01% = 0.0001)
+# 2.0 bps per fill is standard for liquid ETFs/large caps during normal hours
+SLIPPAGE_BPS = 2.0 
+
+# Flat commission per trade/order fill ($0.00 if using zero-commission broker)
+COMMISSION_PER_ORDER = 0.00
+
+# =====================================================================
+# 6. REGIME & UNIVERSE MAPPING
 # =====================================================================
 ACTIVE_ASSET_TYPE = "STOCKS"  # Toggle this between "STOCKS" or "ETFS"
 
