@@ -1,28 +1,32 @@
 import os
 import pickle
+from collections import deque
 from datetime import datetime
+
+import numpy as np
 import optuna
 import pandas as pd
-import numpy as np
-from collections import deque
 from rich.console import Console, Group
-from rich.table import Table
-from rich.panel import Panel
 from rich.live import Live
+from rich.panel import Panel
 from rich.progress import (
-    Progress, SpinnerColumn, TextColumn, BarColumn, 
-    TimeElapsedColumn, TimeRemainingColumn
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
 )
-
-import fitness_engine
-import backtest_control_center as control
-from backtest import preload_regime_data, simulate_strategy_on_universe
+from rich.table import Table
 
 # =====================================================================
 # SPEED PATCH: SILENCE THE UI ENGINE & MONTE CARLO SPAM
 # =====================================================================
 import backtest
+import backtest_control_center as control
+import fitness_engine
 import monte_carlo
+from backtest import preload_regime_data, simulate_strategy_on_universe
 
 if hasattr(backtest, 'reporter'):
     backtest.reporter.print_strategy_header = lambda *args, **kwargs: None
@@ -46,6 +50,9 @@ STAGE_1_TRIALS = 10
 STAGE_2_TRIALS = 15          
 UNIVERSES_TO_KEEP = 5        
 
+# Select which regime types to optimize against. Options: "BULL", "BEAR", "CHOP", "ALL"
+TARGET_REGIME_TAGS = ["BULL", "CHOP"]
+
 ALL_UNIVERSES = [
     "core_stratified",
     "top_dollar_volume_25",
@@ -62,7 +69,7 @@ SEARCH_SPACE = ACTIVE_STRAT.get_optuna_space()
 # =====================================================================
 # 1b. LIVE MONITORING STATE & DUPLICATE TRACKING
 # =====================================================================
-RECENT_TRIALS_WINDOW = 6  # Kept at 6 to prevent terminal height overflow
+RECENT_TRIALS_WINDOW = 6  
 recent_trials = deque(maxlen=RECENT_TRIALS_WINDOW)  
 per_universe_stats = {}  
 seen_parameter_hashes = set()  
@@ -127,9 +134,14 @@ def build_monitor_group():
 # =====================================================================
 def create_objective(universe_logic, phase_name):
     if phase_name == "TRAINING_1":
-        regimes = control.REGIME_WINDOWS_TRAIN_1
+        base_regimes = control.REGIME_WINDOWS_TRAIN_1
     else:
-        regimes = control.REGIME_WINDOWS_TRAIN_2
+        base_regimes = control.REGIME_WINDOWS_TRAIN_2
+
+    if "ALL" in [t.upper() for t in TARGET_REGIME_TAGS]:
+        regimes = base_regimes
+    else:
+        regimes = {k: v for k, v in base_regimes.items() if v.get("tag", "").upper() in [t.upper() for t in TARGET_REGIME_TAGS]}
 
     def objective(trial):
         dynamic_params = {}
@@ -164,7 +176,7 @@ def create_objective(universe_logic, phase_name):
             if metrics["trades"] > 0:
                 regime_metrics_list.append(metrics)
 
-        evaluation = fitness_engine.calculate_heavy_tail_fitness(regime_metrics_list)
+        evaluation = fitness_engine.calculate_trend_fitness(regime_metrics_list)
 
         trial.set_user_attr("total_trades", evaluation["total_trades"])
         trial.set_user_attr("avg_pf", evaluation["avg_pf"])
@@ -179,9 +191,14 @@ def create_objective(universe_logic, phase_name):
 # =====================================================================
 def run_validation_backtest(universe_logic, best_params, phase_name):
     if phase_name == "TRAINING_2":
-        regimes = control.REGIME_WINDOWS_TRAIN_2
+        base_regimes = control.REGIME_WINDOWS_TRAIN_2
     else:
-        regimes = control.REGIME_WINDOWS_FINAL_TEST
+        base_regimes = control.REGIME_WINDOWS_FINAL_TEST
+
+    if "ALL" in [t.upper() for t in TARGET_REGIME_TAGS]:
+        regimes = base_regimes
+    else:
+        regimes = {k: v for k, v in base_regimes.items() if v.get("tag", "").upper() in [t.upper() for t in TARGET_REGIME_TAGS]}
 
     regime_metrics_list = []
     
@@ -223,7 +240,7 @@ if __name__ == "__main__":
         TimeElapsedColumn(),
         TextColumn("• ETA:"),
         TimeRemainingColumn(),
-        auto_refresh=False 
+        auto_refresh=False
     )
 
     def render():
@@ -248,7 +265,6 @@ if __name__ == "__main__":
                     is_dup = trial.user_attrs.get("is_duplicate", False)
                     record_trial_result(u_logic, trial.number, trial.value, is_duplicate=is_dup)
                 
-                # REINSTATED: Forcing explicit UI render loop update
                 live.update(render())
                 
             objective = create_objective(u_logic, "TRAINING_1")
@@ -296,7 +312,6 @@ if __name__ == "__main__":
                     is_dup = trial.user_attrs.get("is_duplicate", False)
                     record_trial_result(u_logic, trial.number, trial.value, is_duplicate=is_dup)
                 
-                # REINSTATED: Forcing explicit UI render loop update
                 live.update(render())
                 
             objective = create_objective(u_logic, "TRAINING_1")

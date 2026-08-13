@@ -9,8 +9,8 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 # Load API environment variables
 load_dotenv() 

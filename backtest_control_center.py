@@ -1,17 +1,16 @@
-from strategies.FiveMinute.Support import M5supportR3
-from strategies.FiveMinute.Support import M5supportR2
-from strategies.FiveMinute.Support import M5supportR1
-from strategies.FiveMinute.Support import M5vixsupport
-from strategies.FifteenMinute import M15geminiV2
-from strategies.FifteenMinute import M15geminiVIX
-from strategies.OneHour import H1gemini
-from strategies.OneHour import H1geminiWIDE
-from strategies.OneHour import H1geminiNARROW
+from strategies.FifteenMinute import M15EMAPullback, M15geminiV2, M15geminiVIX
+from strategies.FiveMinute.Support import (
+    M5supportR1,
+    M5supportR2,
+    M5supportR3,
+    M5vixsupport,
+)
+from strategies.OneHour import H1gemini, H1geminiNARROW, H1geminiWIDE
 
 # =====================================================================
 # 1. STRATEGY & UNIVERSE SELECTION
 # =====================================================================
-ACTIVE_STRATEGIES = [M15geminiVIX]
+ACTIVE_STRATEGIES = [M15EMAPullback]
 
 # TOGGLE YOUR UNIVERSE LOGIC HERE:
 # Options:
@@ -22,7 +21,7 @@ ACTIVE_STRATEGIES = [M15geminiVIX]
 #   • "defensive_value"          -> 20 stocks (Low beta, staples, healthcare, utilities)
 #   • "cyclical_macro"           -> 20 stocks (Industrials, Energy, Autos, Semis, Materials)
 #   • "tech_semiconductor_heavy" -> 20 stocks (Pure-play enterprise tech & semiconductors)
-ACTIVE_UNIVERSE_LOGIC = "cyclical_macro"
+ACTIVE_UNIVERSE_LOGIC = "defensive_value"
 
 # =====================================================================
 # 2. BACKTEST ENGINE CONFIGURATION
@@ -48,20 +47,24 @@ SLIPPAGE_RATES_BPS = [2.0]
 COMMISSION_PER_ORDER = 0.00
 
 # =====================================================================
-# 6. DATASET PHASE CONTROLLER
+# 6. DATASET PHASE CONTROLLER & TAG SELECTOR KNOB
 # =====================================================================
-DATASET_PHASE = "FINAL_TESTING"  
+DATASET_PHASE = "TRAINING_2"  
 ACTIVE_ASSET_TYPE = "STOCKS"  
+
+# FILTER STANDALONE BACKTESTS BY REGIME TAG
+# Options: "ALL", "BULL", "BEAR", "CHOP" or combinations e.g. ["BEAR", "CHOP"]
+TARGET_REGIME_TAGS = ["ALL"]
 
 # ---------------------------------------------------------------------
 # PHASE 1: STANDARD TRAINING DATA (2020-2024)
 # ---------------------------------------------------------------------
 REGIME_WINDOWS_TRAIN_1 = {
     "covid_crash_2020": {
+        "tag": "BEAR",
         "start": "2020-02-19", 
         "end": "2020-03-23",
         "universes": {
-            # Point-in-time constraints: TSLA was smaller, NVDA was hardware only, BA was massive, no PLTR/COIN/ABNB.
             "core_stratified": [
                 "AAPL", "MSFT", "INTC", "CSCO", "ADBE", "CRM", "ORCL", "IBM", "TXN", "QCOM", "AMAT", "MU", "NVDA",
                 "JPM", "BAC", "WFC", "C", "GS", "MS", "V", "MA", "JNJ", "UNH", "PFE", "MRK", "ABT", "AMGN",
@@ -96,10 +99,10 @@ REGIME_WINDOWS_TRAIN_1 = {
         }
     },
     "bull_run_2021": {
+        "tag": "BULL",
         "start": "2021-04-01", 
         "end": "2021-11-19",
         "universes": {
-            # 2021 specific: MRNA explodes, TSLA enters S&P 500 top 5, meme-adjacent volume spikes.
             "core_stratified": [
                 "AAPL", "MSFT", "AMZN", "FB", "GOOGL", "TSLA", "NVDA", "JPM", "JNJ", "UNH", "HD", "PG", "BAC",
                 "DIS", "ADBE", "NFLX", "CRM", "PFE", "MRNA", "ABBV", "NKE", "WMT", "KO", "PEP", "XOM",
@@ -134,10 +137,10 @@ REGIME_WINDOWS_TRAIN_1 = {
         }
     },
     "bear_chop_2022": {
+        "tag": "CHOP",
         "start": "2022-01-03", 
         "end": "2022-10-13",
         "universes": {
-            # 2022 specific: Energy dominance (OXY, HAL), Defense stocks (LMT, NOC), Tech valuations crushed.
             "core_stratified": [
                 "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "UNH", "JNJ", "XOM", "CVX", "JPM", "V", "PG", "HD",
                 "CVX", "MA", "ABBV", "PFE", "LLY", "BAC", "KO", "PEP", "COST", "MRK", "TMO", "MCD",
@@ -172,10 +175,10 @@ REGIME_WINDOWS_TRAIN_1 = {
         }
     },
     "correction_2023": {
+        "tag": "CHOP",
         "start": "2023-07-31", 
         "end": "2023-10-27",
         "universes": {
-            # Mid-2023: GLP-1 explosion (LLY), Magnificent 7 consolidation, Regional bank crisis aftermath.
             "core_stratified": [
                 "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "LLY", "UNH", "JPM", "V", "JNJ",
                 "XOM", "WMT", "PG", "MA", "AVGO", "HD", "CVX", "MRK", "ABBV", "COST", "PEP", "ADBE",
@@ -210,10 +213,10 @@ REGIME_WINDOWS_TRAIN_1 = {
         }
     },
     "ai_bull_2023_2024": {
+        "tag": "BULL",
         "start": "2023-11-01", 
         "end": "2024-05-01",
         "universes": {
-            # Late 2023-2024: Pure AI hardware dominance (NVDA, SMCI, ARM), Utility power plays (VST, CEG) emerge.
             "core_stratified": [
                 "MSFT", "AAPL", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "LLY", "AVGO", "JPM", "UNH", "V",
                 "XOM", "MA", "JNJ", "PG", "HD", "COST", "MRK", "ABBV", "CRM", "AMD", "CVX", "WMT",
@@ -254,10 +257,10 @@ REGIME_WINDOWS_TRAIN_1 = {
 # ---------------------------------------------------------------------
 REGIME_WINDOWS_TRAIN_2 = {
     "pre_election_chop_2024": {
+        "tag": "CHOP",
         "start": "2024-06-01",
         "end": "2024-11-04",
         "universes": {
-            # Modern 2024 institutional allocations.
             "core_stratified": [
                 "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "LLY", "TSLA", "AVGO", "JPM", "UNH", "V",
                 "XOM", "MA", "JNJ", "PG", "HD", "COST", "MRK", "ABBV", "CRM", "AMD", "CVX", "WMT",
@@ -292,6 +295,7 @@ REGIME_WINDOWS_TRAIN_2 = {
         }
     },
     "election_rally_2024_2025": {
+        "tag": "BULL",
         "start": "2024-11-05",
         "end": "2025-02-18",
         "universes": {
@@ -329,6 +333,7 @@ REGIME_WINDOWS_TRAIN_2 = {
         }
     },
     "tariff_shock_correction_2025": {
+        "tag": "BEAR",
         "start": "2025-02-19",
         "end": "2025-04-08",
         "universes": {
@@ -366,6 +371,7 @@ REGIME_WINDOWS_TRAIN_2 = {
         }
     },
     "trump_put_recovery_2025": {
+        "tag": "BULL",
         "start": "2025-04-09",
         "end": "2025-07-31",
         "universes": {
@@ -409,6 +415,7 @@ REGIME_WINDOWS_TRAIN_2 = {
 # ---------------------------------------------------------------------
 REGIME_WINDOWS_FINAL_TEST = {
     "latest_2025_2026": {
+        "tag": "ALL",
         "start": "2025-08-01", 
         "end": "2026-08-01",
         "universes": {
@@ -448,13 +455,21 @@ REGIME_WINDOWS_FINAL_TEST = {
 }
 
 # ---------------------------------------------------------------------
-# APPLY DATASET ROUTING
+# APPLY DATASET ROUTING & TAG FILTERING
 # ---------------------------------------------------------------------
 if DATASET_PHASE == "TRAINING_1":
-    REGIME_WINDOWS = REGIME_WINDOWS_TRAIN_1
+    RAW_REGIME_WINDOWS = REGIME_WINDOWS_TRAIN_1
 elif DATASET_PHASE == "TRAINING_2":
-    REGIME_WINDOWS = REGIME_WINDOWS_TRAIN_2
+    RAW_REGIME_WINDOWS = REGIME_WINDOWS_TRAIN_2
 elif DATASET_PHASE == "FINAL_TESTING":
-    REGIME_WINDOWS = REGIME_WINDOWS_FINAL_TEST
+    RAW_REGIME_WINDOWS = REGIME_WINDOWS_FINAL_TEST
 else:
-    REGIME_WINDOWS = REGIME_WINDOWS_TRAIN_1
+    RAW_REGIME_WINDOWS = REGIME_WINDOWS_TRAIN_1
+
+if "ALL" in [t.upper() for t in TARGET_REGIME_TAGS]:
+    REGIME_WINDOWS = RAW_REGIME_WINDOWS
+else:
+    REGIME_WINDOWS = {
+        k: v for k, v in RAW_REGIME_WINDOWS.items()
+        if v.get("tag", "").upper() in [t.upper() for t in TARGET_REGIME_TAGS]
+    }
