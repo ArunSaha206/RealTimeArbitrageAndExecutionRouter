@@ -25,18 +25,10 @@ SUMMARY_REPORT_PATH = os.path.join(RESULTS_CACHE_DIR, "summary_report.pkl")
 
 @st.cache_resource(show_spinner="Loading cached backtest files into memory...")
 def load_all_cached_results():
-    """
-    Reads all pickle files ONCE and keeps them in memory by reference.
-    Bypasses Streamlit's double-pickle overhead.
-
-    Dedupes by (symbol, strategy_used, regime_name), keeping only the newest
-    file on disk, and skips summary_report.pkl (that's a separate consolidated
-    report, not a per-symbol result).
-    """
     if not os.path.exists(RESULTS_CACHE_DIR):
         return []
 
-    latest_by_key = {}  # (symbol, strategy_used, regime_name) -> (mtime, result_dict)
+    latest_by_key = {} 
 
     for filename in os.listdir(RESULTS_CACHE_DIR):
         if not filename.endswith(".pkl") or filename == "summary_report.pkl":
@@ -69,16 +61,6 @@ def load_all_cached_results():
 
 @st.cache_data(show_spinner="Aggregating portfolio equity curves...")
 def compute_portfolio_metrics(_strat_data, strategy_name, regime_name, data_fingerprint):
-    """
-    By naming the argument `_strat_data`, we instruct Streamlit to SKIP hashing
-    the massive dataset. It only hashes `strategy_name`, `regime_name`, and
-    `data_fingerprint` (a small ticker/trade-count summary), so the cache
-    invalidates when the underlying data actually changes.
-
-    All symbols passed in via _strat_data MUST belong to the same regime
-    (same date window) — this function sums equity curves across symbols,
-    which is only meaningful if they all cover the same historical period.
-    """
     if not _strat_data:
         return None, None, 0.0, 0.0, 0, 0.0, []
 
@@ -120,15 +102,6 @@ def get_report_mtime():
 
 @st.cache_data(show_spinner="Loading full backtest report...")
 def load_summary_report(report_mtime):
-    """
-    Loads the consolidated summary_report.pkl that Backtest.py writes at the
-    end of every run: per-regime P&L (pre/post tax), Monte Carlo stress test
-    results, and the cross-strategy comparison matrix — the same data the
-    terminal prints, made available to the dashboard.
-
-    report_mtime is passed in purely so this cache invalidates whenever the
-    file is rewritten by a new backtest run.
-    """
     if not os.path.exists(SUMMARY_REPORT_PATH):
         return None
     try:
@@ -145,13 +118,13 @@ raw_data = load_all_cached_results()
 
 if not raw_data:
     st.title("📈 Quant Execution Router")
-    st.warning(f"No cached results found in `{RESULTS_CACHE_DIR}/`. Run your `Backtest.py` engine first.")
+    st.warning(f"No cached results found in `{RESULTS_CACHE_DIR}/`. Run your `backtest.py` engine first.")
     st.stop()
 
 tab_live, tab_report = st.tabs(["📈 Live Explorer", "📋 Full Backtest Report"])
 
 # =============================================================================
-# TAB 1: LIVE EXPLORER (equity curves, drawdowns, ticker-level trade logs)
+# TAB 1: LIVE EXPLORER
 # =============================================================================
 with tab_live:
     st.sidebar.title("Control Room")
@@ -177,16 +150,10 @@ with tab_live:
     if selected_ticker == "All Portfolio (Aggregated)":
         st.subheader("Portfolio Equity & Risk Metrics")
 
-        fingerprint = (
-            len(strat_data),
-            sum(len(r.get("trades", [])) for r in strat_data),
-        )
+        fingerprint = (len(strat_data), sum(len(r.get("trades", [])) for r in strat_data))
 
         daily_equity, drawdown_pct, net_pnl, net_pct, total_trades, win_rate, all_trades = compute_portfolio_metrics(
-            _strat_data=strat_data,
-            strategy_name=selected_strategy,
-            regime_name=selected_regime,
-            data_fingerprint=fingerprint
+            _strat_data=strat_data, strategy_name=selected_strategy, regime_name=selected_regime, data_fingerprint=fingerprint
         )
 
         if daily_equity is not None:
@@ -200,36 +167,21 @@ with tab_live:
 
             fig_eq = go.Figure()
             fig_eq.add_trace(go.Scatter(
-                x=daily_equity.index,
-                y=daily_equity.values,
-                mode='lines',
-                name='Portfolio Value',
-                line=dict(color='#00E676', width=2)
+                x=daily_equity.index, y=daily_equity.values, mode='lines', name='Portfolio Value', line=dict(color='#00E676', width=2)
             ))
             fig_eq.update_layout(
-                title=f"Portfolio Cumulative Growth — {selected_regime}",
-                height=350,
-                template="plotly_dark",
-                margin=dict(l=20, r=20, t=40, b=20),
-                hovermode="x unified"
+                title=f"Portfolio Cumulative Growth — {selected_regime}", height=350, template="plotly_dark",
+                margin=dict(l=20, r=20, t=40, b=20), hovermode="x unified"
             )
             st.plotly_chart(fig_eq, use_container_width=True)
 
             fig_dd = go.Figure()
             fig_dd.add_trace(go.Scatter(
-                x=drawdown_pct.index,
-                y=drawdown_pct.values,
-                fill='tozeroy',
-                mode='lines',
-                name='Drawdown %',
-                line=dict(color='#FF5252', width=1)
+                x=drawdown_pct.index, y=drawdown_pct.values, fill='tozeroy', mode='lines', name='Drawdown %', line=dict(color='#FF5252', width=1)
             ))
             fig_dd.update_layout(
-                title="Portfolio Underwater Drawdown Profile (%)",
-                height=220,
-                template="plotly_dark",
-                margin=dict(l=20, r=20, t=40, b=20),
-                hovermode="x unified"
+                title="Portfolio Underwater Drawdown Profile (%)", height=220, template="plotly_dark",
+                margin=dict(l=20, r=20, t=40, b=20), hovermode="x unified"
             )
             st.plotly_chart(fig_dd, use_container_width=True)
         else:
@@ -240,16 +192,12 @@ with tab_live:
         t_data = next((r for r in strat_data if r["symbol"] == selected_ticker), None)
 
         if t_data:
-            # --- DYNAMIC METRICS RENDERING ---
             ticker_metrics = t_data.get("metrics", {})
             if ticker_metrics:
-                # Create exactly as many columns as there are metrics in your dictionary
                 cols = st.columns(len(ticker_metrics))
                 for idx, (metric_name, metric_value) in enumerate(ticker_metrics.items()):
-                    # Inverse color for Drawdown, normal for everything else
                     delta_color = "inverse" if "Drawdown" in metric_name else "normal"
                     cols[idx].metric(metric_name, metric_value, delta_color=delta_color)
-            # ---------------------------------
 
             st.markdown("---")
 
@@ -267,27 +215,23 @@ with tab_live:
 
                 st.dataframe(
                     display_df.style.format({
-                        'Entry ($)': '${:.2f}',
-                        'Exit ($)': '${:.2f}',
-                        'P&L ($)': '${:+.2f}',
-                        'P&L (%)': '{:+.2f}%'
+                        'Entry ($)': '${:.2f}', 'Exit ($)': '${:.2f}', 'P&L ($)': '${:+.2f}', 'P&L (%)': '{:+.2f}%'
                     }),
-                    use_container_width=True,
-                    height=300
+                    use_container_width=True, height=300
                 )
             else:
                 st.info("No trades executed for this ticker.")
         else:
-            st.warning(f"No cached result found for {selected_ticker} under strategy '{selected_strategy}' / regime '{selected_regime}'.")
+            st.warning(f"No cached result found for {selected_ticker}.")
 
 # =============================================================================
-# TAB 2: FULL BACKTEST REPORT (regime breakdown, taxes, Monte Carlo, comparison)
+# TAB 2: FULL BACKTEST REPORT 
 # =============================================================================
 with tab_report:
     report_mtime = get_report_mtime()
 
     if report_mtime is None:
-        st.info("No full report found yet. Run `Backtest.py` to generate `results_cache/summary_report.pkl`.")
+        st.info("No full report found yet. Run `backtest.py` to generate `results_cache/summary_report.pkl`.")
     else:
         report = load_summary_report(report_mtime)
 
@@ -313,14 +257,16 @@ with tab_report:
                 g_pnl_pct_post = (g_pnl_post / g["total_initial_capital"] * 100) if g["total_initial_capital"] > 0 else 0.0
                 global_win_rate = (g["total_wins"] / g["total_trades"] * 100) if g["total_trades"] > 0 else 0.0
                 global_pf = (g["total_gross_profit"] / g["total_gross_loss"]) if g["total_gross_loss"] > 0 else 0.0
+                
+                true_sharpe = g.get("true_global_sharpe", 0.0)
+                true_dd = g.get("true_global_max_dd_pct", 0.0)
 
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Global Pre-Tax P&L", f"${g_pnl_pre:,.2f}", f"{g_pnl_pct_pre:+.2f}%")
-                c2.metric("Global Post-Tax P&L", f"${g_pnl_post:,.2f}", f"{g_pnl_pct_post:+.2f}%")
-                c3.metric("Global Win Rate", f"{global_win_rate:.1f}%")
-                c4.metric("Global Profit Factor", f"{global_pf:.2f}")
+                c1.metric("Global Post-Tax P&L", f"${g_pnl_post:,.2f}", f"{g_pnl_pct_post:+.2f}%")
+                c2.metric("Global Win Rate", f"{global_win_rate:.1f}%")
+                c3.metric("Global Profit Factor", f"{global_pf:.2f}")
+                c4.metric("True Global Sharpe", f"{true_sharpe:.2f}", f"-{true_dd:.2f}% DD", delta_color="inverse")
 
-                # --- Regime-by-regime table (mirrors the terminal recap table) ---
                 regime_rows = []
                 for rs in g["regime_summaries"]:
                     regime_rows.append({
@@ -344,23 +290,14 @@ with tab_report:
                     regime_df = pd.DataFrame(regime_rows).set_index("Regime")
                     st.dataframe(
                         regime_df.style.format({
-                            "Pre-Tax P&L ($)": "${:,.2f}",
-                            "Pre-Tax (%)": "{:+.2f}%",
-                            "Tax Impact ($)": "${:,.2f}",
-                            "Post-Tax P&L ($)": "${:,.2f}",
-                            "Post-Tax (%)": "{:+.2f}%",
-                            "B&H (%)": "{:+.2f}%",
-                            "Win %": "{:.1f}%",
-                            "PF": "{:.2f}",
-                            "Sharpe": "{:.2f}",
-                            "Max DD (%)": "-{:.2f}%",
-                            "Beta": "{:.2f}",
-                            "Alpha (%)": "{:+.2f}%",
+                            "Pre-Tax P&L ($)": "${:,.2f}", "Pre-Tax (%)": "{:+.2f}%", "Tax Impact ($)": "${:,.2f}",
+                            "Post-Tax P&L ($)": "${:,.2f}", "Post-Tax (%)": "{:+.2f}%", "B&H (%)": "{:+.2f}%",
+                            "Win %": "{:.1f}%", "PF": "{:.2f}", "Sharpe": "{:.2f}", "Max DD (%)": "-{:.2f}%",
+                            "Beta": "{:.2f}", "Alpha (%)": "{:+.2f}%",
                         }, na_rep="N/A"),
                         use_container_width=True
                     )
 
-                # --- Monte Carlo stress test per regime ---
                 for rs in g["regime_summaries"]:
                     mc = rs.get("monte_carlo")
                     if not mc:
@@ -382,29 +319,43 @@ with tab_report:
                             "Percentile": ["95th (Optimistic)", "75th", "50th (Median)", "25th", "5th (Pessimistic)"],
                             "Ending Balance ($)": [pct["p95"], pct["p75"], pct["p50"], pct["p25"], pct["p5"]],
                             "Return (%)": [
-                                (pct["p95"] - cap) / cap * 100,
-                                (pct["p75"] - cap) / cap * 100,
-                                (pct["p50"] - cap) / cap * 100,
-                                (pct["p25"] - cap) / cap * 100,
-                                (pct["p5"] - cap) / cap * 100,
+                                (pct["p95"] - cap) / cap * 100, (pct["p75"] - cap) / cap * 100,
+                                (pct["p50"] - cap) / cap * 100, (pct["p25"] - cap) / cap * 100, (pct["p5"] - cap) / cap * 100,
                             ]
                         }).set_index("Percentile")
-                        st.dataframe(
-                            pct_df.style.format({"Ending Balance ($)": "${:,.2f}", "Return (%)": "{:+.2f}%"}),
-                            use_container_width=True
-                        )
+                        st.dataframe(pct_df.style.format({"Ending Balance ($)": "${:,.2f}", "Return (%)": "{:+.2f}%"}), use_container_width=True)
 
                         dd = mc["drawdown_percentiles"]
                         streak = mc["streak_percentiles"]
-                        st.caption(
-                            f"Median drawdown: -{dd['p50']:.2f}% | 95th %ile: -{dd['p95']:.2f}% "
-                            f"— Median loss streak: {streak['p50']} | 95th %ile: {streak['p95']}"
-                        )
+                        st.caption(f"Median drawdown: -{dd['p50']:.2f}% | 95th %ile: -{dd['p95']:.2f}% — Median loss streak: {streak['p50']} | 95th %ile: {streak['p95']}")
 
                 st.markdown("---")
 
-            # --- Cross-strategy comparison matrix (only present when >1 strategy tested) ---
             if report.get("comparison_matrix"):
-                st.markdown("## 🏆 Strategy Comparison Matrix")
-                comp_df = pd.DataFrame(report["comparison_matrix"]).set_index("Strategy")
+                st.markdown("## 🏆 Transposed Strategy Comparison Matrix")
+                
+                comp_df = pd.DataFrame(report["comparison_matrix"]).set_index("Metric")
                 st.dataframe(comp_df, use_container_width=True)
+                
+                st.markdown("### Visual Analytics")
+                col1, col2 = st.columns(2)
+
+                def clean_for_chart(val):
+                    if isinstance(val, str):
+                        val = val.replace("$", "").replace("%", "").replace(",", "").replace("+", "")
+                    try:
+                        return float(val)
+                    except:
+                        return 0.0
+                
+                with col1:
+                    st.write("**Profit Factor vs Friction**")
+                    if "Profit Factor" in comp_df.index:
+                        pf_series = comp_df.loc["Profit Factor"].apply(clean_for_chart)
+                        st.bar_chart(pf_series)
+                    
+                with col2:
+                    st.write("**True Global Sharpe vs Friction**")
+                    if "True Global Sharpe" in comp_df.index:
+                        sharpe_series = comp_df.loc["True Global Sharpe"].apply(clean_for_chart)
+                        st.bar_chart(sharpe_series)

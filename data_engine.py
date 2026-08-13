@@ -34,11 +34,14 @@ def fetch_deep_history(symbol, resolution, start_date_str, end_date_str, provide
                 df = raw_data.to_df()
                 
                 if df.empty:
+                    print(f"⚠️ No data returned for {symbol} [{start_date_str} → {end_date_str}] on XNAS.ITCH "
+                          f"(likely not Nasdaq-listed, or outside coverage for this date range).")
                     return []
                     
                 df.to_parquet(cache_file)
                 
             except Exception as e:
+                print(f"❌ Fetch failed for {symbol} [{start_date_str} → {end_date_str}]: {e}")
                 return []
 
         if df.index.tz is None:

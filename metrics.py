@@ -39,6 +39,33 @@ def calculate_sharpe_ratio(equity_curve, periods_per_year=19500, risk_free_rate=
     sharpe = np.mean(excess_returns) / np.std(excess_returns) * np.sqrt(periods_per_year)
     return float(sharpe)
 
+def calculate_sortino_ratio(equity_curve, periods_per_year=19500, risk_free_rate=0.04):
+    if len(equity_curve) < 2:
+        return 0.0
+
+    returns = np.diff(equity_curve) / equity_curve[:-1]
+    returns = returns[~np.isnan(returns)]
+
+    if len(returns) == 0:
+        return 0.0
+
+    rf_per_period = (1 + risk_free_rate)**(1 / periods_per_year) - 1
+    excess_returns = returns - rf_per_period
+    
+    # Sortino only cares about the downside
+    downside_returns = excess_returns[excess_returns < 0]
+    
+    if len(downside_returns) == 0:
+        return 99.0 # Effectively infinite if there are literally zero downside periods
+        
+    downside_deviation = np.sqrt(np.mean(downside_returns**2))
+    
+    if downside_deviation == 0:
+        return 0.0
+
+    sortino = np.mean(excess_returns) / downside_deviation * np.sqrt(periods_per_year)
+    return float(sortino)
+
 def get_beta_and_alpha(strategy_daily_returns, benchmark_symbol="SPY", risk_free_rate_annual=0.04):
     if strategy_daily_returns.empty or len(strategy_daily_returns) < 3:
         return None
@@ -130,6 +157,9 @@ def generate_all_metrics(equity_curve, timestamps, trades, periods_per_year, sta
     
     sharpe = calculate_sharpe_ratio(equity_curve, periods_per_year=periods_per_year)
     metrics["Sharpe Ratio"] = f"{sharpe:.2f}"
+
+    sortino = calculate_sortino_ratio(equity_curve, periods_per_year=periods_per_year)
+    metrics["Sortino Ratio"] = f"{sortino:.2f}"
 
     # 3. Trade Stats
     winning_trades = [t for t in trades if t["pnl_dollars"] > 0]
