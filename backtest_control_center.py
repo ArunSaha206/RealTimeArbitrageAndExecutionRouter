@@ -1,4 +1,4 @@
-from strategies.FifteenMinute import M15EMAPullback, M15geminiV2, M15geminiVIX
+from strategies.FifteenMinute import M15claudeV1, M15geminiV2, M15geminiVIX, M15supportVIX
 from strategies.FiveMinute.Support import (
     M5supportR1,
     M5supportR2,
@@ -10,7 +10,7 @@ from strategies.OneHour import H1gemini, H1geminiNARROW, H1geminiWIDE
 # =====================================================================
 # 1. STRATEGY & UNIVERSE SELECTION
 # =====================================================================
-ACTIVE_STRATEGIES = [M15EMAPullback]
+ACTIVE_STRATEGIES = [M15geminiVIX]
 
 # TOGGLE YOUR UNIVERSE LOGIC HERE:
 # Options:
@@ -49,7 +49,7 @@ COMMISSION_PER_ORDER = 0.00
 # =====================================================================
 # 6. DATASET PHASE CONTROLLER & TAG SELECTOR KNOB
 # =====================================================================
-DATASET_PHASE = "TRAINING_2"  
+DATASET_PHASE = "TESTING_1"  
 ACTIVE_ASSET_TYPE = "STOCKS"  
 
 # FILTER STANDALONE BACKTESTS BY REGIME TAG

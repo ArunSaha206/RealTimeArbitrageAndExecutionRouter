@@ -28,6 +28,33 @@ import fitness_engine
 import monte_carlo
 from backtest import preload_regime_data, simulate_strategy_on_universe
 
+# =====================================================================
+# FITNESS ENGINE REGISTRY
+# =====================================================================
+# Every fitness function takes (regime_metrics_list) and returns a dict
+# with at least "fitness_score", "avg_pf", "min_p5", "total_trades" --
+# that's the only contract this file relies on. To add a new one: drop
+# the module import, add one line to FITNESS_ENGINES, done. To switch
+# which one runs: change ACTIVE_FITNESS_ENGINE below, nothing else.
+FITNESS_ENGINES = {
+    "heavy_tail": fitness_engine.calculate_heavy_tail_fitness,
+    "bull_chop": fitness_engine.calculate_bull_chop_fitness,
+    "bull_50th_pct": fitness_engine.calculate_percentile_fitness
+}
+
+# <-- THE ONLY LINE YOU NEED TO TOUCH TO SWAP FITNESS ENGINES
+ACTIVE_FITNESS_ENGINE = "bull_50th_pct"
+
+def get_active_fitness_fn():
+    try:
+        return FITNESS_ENGINES[ACTIVE_FITNESS_ENGINE]
+    except KeyError:
+        available = ", ".join(sorted(FITNESS_ENGINES)) or "(none registered)"
+        raise ValueError(
+            f"ACTIVE_FITNESS_ENGINE = '{ACTIVE_FITNESS_ENGINE}' is not registered. "
+            f"Available: {available}"
+        )
+
 if hasattr(backtest, 'reporter'):
     backtest.reporter.print_strategy_header = lambda *args, **kwargs: None
     backtest.reporter.print_regime_header = lambda *args, **kwargs: None
@@ -51,7 +78,7 @@ STAGE_2_TRIALS = 15
 UNIVERSES_TO_KEEP = 5        
 
 # Select which regime types to optimize against. Options: "BULL", "BEAR", "CHOP", "ALL"
-TARGET_REGIME_TAGS = ["BULL", "CHOP"]
+TARGET_REGIME_TAGS = ["BULL"]
 
 ALL_UNIVERSES = [
     "core_stratified",
@@ -176,7 +203,7 @@ def create_objective(universe_logic, phase_name):
             if metrics["trades"] > 0:
                 regime_metrics_list.append(metrics)
 
-        evaluation = fitness_engine.calculate_trend_fitness(regime_metrics_list)
+        evaluation = get_active_fitness_fn()(regime_metrics_list)
 
         trial.set_user_attr("total_trades", evaluation["total_trades"])
         trial.set_user_attr("avg_pf", evaluation["avg_pf"])
@@ -215,15 +242,19 @@ def run_validation_backtest(universe_logic, best_params, phase_name):
         if metrics["trades"] > 0:
             regime_metrics_list.append(metrics)
 
-    evaluation = fitness_engine.calculate_heavy_tail_fitness(regime_metrics_list)
+    evaluation = get_active_fitness_fn()(regime_metrics_list)
     return evaluation["fitness_score"]
 
 # =====================================================================
 # 4. MASTER ORCHESTRATOR PIPELINE
 # =====================================================================
 if __name__ == "__main__":
-    console.rule(f"[bold white]🚀 QUANT EXECUTION MASTER ORCHESTRATOR | STRATEGY: {ACTIVE_STRAT.__name__}[/bold white]")
-    
+    console.rule(
+        f"[bold white]🚀 QUANT EXECUTION MASTER ORCHESTRATOR | "
+        f"STRATEGY: {ACTIVE_STRAT.__name__} | FITNESS: {ACTIVE_FITNESS_ENGINE}[/bold white]"
+    )
+    get_active_fitness_fn()  # fail fast at startup if ACTIVE_FITNESS_ENGINE is misconfigured
+
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     
     studies = {
@@ -273,21 +304,55 @@ if __name__ == "__main__":
             progress.update(master_task, advance=1)
             progress.remove_task(trial_task)
 
+        # # ---------------------------------------------------------
+        # # STAGE 2: CONSISTENCY TOURNAMENT
+        # # ---------------------------------------------------------
+        # console.print(f"\n[bold yellow]STAGE 2: NARROWING TO TOP {UNIVERSES_TO_KEEP} (Median - StdDev Filter)[/bold yellow]")
+        
+        # consistency_scores = {}
+        # for u_logic, study in studies.items():
+        #     completed_trials = [t.value for t in study.trials if t.value is not None]
+            
+        #     if len(completed_trials) > 0:
+        #         consistency_score = np.median(completed_trials) - np.std(completed_trials)
+        #         consistency_scores[u_logic] = consistency_score
+        #         console.print(f"   📊 {u_logic}: Median {np.median(completed_trials):.2f} | StdDev {np.std(completed_trials):.2f}")
+        #     else:
+        #         consistency_scores[u_logic] = -10.0
+                
+        # sorted_universes = sorted(consistency_scores.items(), key=lambda x: x[1], reverse=True)
+        # top_5_logics = [x[0] for x in sorted_universes[:UNIVERSES_TO_KEEP]]
+        
+        # for u_logic, score in sorted_universes:
+        #     if u_logic in top_5_logics:
+        #         console.print(f"   [green]✔️ ADVANCED:[/green] {u_logic} (Score: {score:.2f})")
+        #     else:
+        #         console.print(f"   [red]❌ CULLED:[/red] {u_logic} (Score: {score:.2f})")
+
         # ---------------------------------------------------------
         # STAGE 2: CONSISTENCY TOURNAMENT
         # ---------------------------------------------------------
-        console.print(f"\n[bold yellow]STAGE 2: NARROWING TO TOP {UNIVERSES_TO_KEEP} (Median - StdDev Filter)[/bold yellow]")
+        console.print(f"\n[bold yellow]STAGE 2: NARROWING TO TOP {UNIVERSES_TO_KEEP} (Top-3 Valid Average)[/bold yellow]")
         
         consistency_scores = {}
         for u_logic, study in studies.items():
-            completed_trials = [t.value for t in study.trials if t.value is not None]
+            # 1. Extract only valid trials (ignore the -10.0 penalties)
+            valid_trials = [t.value for t in study.trials if t.value is not None and t.value > -9.0]
             
-            if len(completed_trials) > 0:
-                consistency_score = np.median(completed_trials) - np.std(completed_trials)
+            if len(valid_trials) > 0:
+                # 2. Sort descending so the highest fitness scores are first
+                valid_trials.sort(reverse=True)
+                
+                # 3. Take the top 3 best performing trials (or fewer if 3 aren't available)
+                top_k = valid_trials[:3]
+                consistency_score = float(np.mean(top_k))
+                
                 consistency_scores[u_logic] = consistency_score
-                console.print(f"   📊 {u_logic}: Median {np.median(completed_trials):.2f} | StdDev {np.std(completed_trials):.2f}")
+                console.print(f"   📊 {u_logic}: Top-{len(top_k)} Avg {consistency_score:.2f} | Valid Trials: {len(valid_trials)}/{STAGE_1_TRIALS}")
             else:
+                # If Optuna failed every single trial, the universe is dead
                 consistency_scores[u_logic] = -10.0
+                console.print(f"   📊 {u_logic}: FAILED (All {STAGE_1_TRIALS} trials hit penalty)")
                 
         sorted_universes = sorted(consistency_scores.items(), key=lambda x: x[1], reverse=True)
         top_5_logics = [x[0] for x in sorted_universes[:UNIVERSES_TO_KEEP]]
